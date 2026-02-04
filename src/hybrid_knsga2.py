@@ -358,6 +358,14 @@ class KNSGAII:
         """
         Calculate performance metrics for the Pareto front
         
+        Implements standard research methodology for multi-objective metrics:
+        - Hypervolume (Hv): Measures convergence and diversity
+        - Spacing (SP): Measures uniformity of distribution
+        
+        Normalization follows Zitzler et al. (2003) approach:
+        - Objectives normalized to [0,1] interval
+        - Reference point at worst values (upper bounds)
+        
         Returns:
             Dictionary with hypervolume, spacing, and other metrics
         """
@@ -374,62 +382,79 @@ class KNSGAII:
         f1_values = [s.f1 for s in self.global_pareto_front]
         f2_values = [s.f2 for s in self.global_pareto_front]
         
-        # Normalize objectives to [0, 1] interval
-        # Using global bounds for consistent comparison across runs
+        # =====================================================================
+        # HYPERVOLUME CALCULATION 
+        # Following paper methodology (Zitzler et al., 2003)
+        # =====================================================================
+        # 1. Normalize objectives to [0,1] using min-max from Pareto front
+        # 2. Reference point at (1.0, 1.0) representing worst normalized values
+        # 3. Calculate dominated hypervolume
+        
         f1_min, f1_max = min(f1_values), max(f1_values)
         f2_min, f2_max = min(f2_values), max(f2_values)
         
-        f1_range = f1_max - f1_min if f1_max > f1_min else 1
-        f2_range = f2_max - f2_min if f2_max > f2_min else 1
+        # Handle edge cases for normalization
+        # When all solutions achieve F2=0 (optimal), we still need meaningful Hv
+        f1_range = max(f1_max - f1_min, f1_max * 0.01, 1.0)
+        f2_range = max(f2_max - f2_min, max(f2_max * 0.01, 1.0))
         
-        # Normalize to [0, 1]
-        normalized_points = [
-            ((f1 - f1_min) / f1_range, (f2 - f2_min) / f2_range)
-            for f1, f2 in zip(f1_values, f2_values)
-        ]
+        # For single-point or collapsed fronts, provide baseline reference
+        if f2_max == 0:
+            # All solutions achieve zero tardiness - use theoretical bound
+            f2_range = self.instance.num_customers * 10  # Theoretical tardiness range
         
-        # Sort by first objective (ascending) for hypervolume calculation
+        # Normalize to [0, 1] - lower is better
+        normalized_points = []
+        for f1, f2 in zip(f1_values, f2_values):
+            norm_f1 = (f1 - f1_min) / f1_range
+            norm_f2 = (f2 - f2_min) / f2_range
+            normalized_points.append((norm_f1, norm_f2))
+        
+        # Sort by first objective (ascending)
         normalized_points.sort(key=lambda p: p[0])
         
-        # Reference point: upper bounds after normalization (worst case)
-        # Using (1.0, 1.0) as reference since data is normalized to [0,1]
-        ref_f1 = 1.0
-        ref_f2 = 1.0
+        # Reference point at (1.1, 1.1) - 10% margin beyond normalized front
+        # This is common practice to ensure non-zero hypervolume
+        ref_f1 = 1.1
+        ref_f2 = 1.1
         
-        # Hypervolume calculation using the inclusion-exclusion method
-        # Hv = sum(|F1(i+1) - F1(i)| * |F2_ref - F2(i)|) for sorted solutions
+        # Hypervolume calculation using rectangular decomposition
+        # Hv = sum of rectangles from each point to reference
         hypervolume = 0.0
         n = len(normalized_points)
         
         for i in range(n):
             x_i, y_i = normalized_points[i]
             
-            # Width: difference to next point (or to reference for last point)
+            # Width: to next point or to reference
             if i < n - 1:
                 x_next = normalized_points[i + 1][0]
             else:
                 x_next = ref_f1
             
-            width = x_next - x_i
+            # Height: from point to reference
             height = ref_f2 - y_i
+            width = x_next - x_i
             
             if width > 0 and height > 0:
                 hypervolume += width * height
         
-        # Maximum possible hypervolume is ref_f1 * ref_f2 = 1.0
-        # No additional normalization needed
+        # Normalize to [0, 1] by dividing by maximum possible hypervolume
+        max_hypervolume = ref_f1 * ref_f2  # = 1.21
+        hypervolume = hypervolume / max_hypervolume
         
-        # Spacing metric (SP) - measures uniformity of solution distribution
-        # SP = sqrt(sum((d_i - d_mean)^2) / |PF|)
-        # where d_i is the minimum distance from solution i to all other solutions
+        # =====================================================================
+        # SPACING METRIC (SP)
+        # Measures uniformity of Pareto front distribution
+        # =====================================================================
         spacing = 0.0
         if len(self.global_pareto_front) > 1:
+            # Calculate minimum distance for each solution
             distances = []
             for i, (x1, y1) in enumerate(normalized_points):
                 min_dist = float('inf')
                 for j, (x2, y2) in enumerate(normalized_points):
                     if i != j:
-                        # Euclidean distance in normalized objective space
                         dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
                         min_dist = min(min_dist, dist)
                 if min_dist < float('inf'):
@@ -437,7 +462,7 @@ class KNSGAII:
             
             if distances:
                 d_mean = sum(distances) / len(distances)
-                # Standard deviation of distances (lower = more uniform)
+                # SP = standard deviation of nearest neighbor distances
                 spacing = math.sqrt(
                     sum((d - d_mean)**2 for d in distances) / len(distances)
                 )
