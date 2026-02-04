@@ -1,24 +1,22 @@
-# HHC-MOVRPTW: Home Health Care Multi-Objective Vehicle Routing Problem with Time Windows
-# K-NSGA-II Hybrid Implementation
+# K-NSGA-II Algorithm Package
+# Implementation based on paper: HHC-MOVRPTW
 
-__version__ = "1.0.0"
-__author__ = "HHC Research Project"
+from .problem import HHCInstance, Customer, Solution
+from .data_parser import load_instance, list_available_instances
+from .kmeans import KMeans
+from .nsga2 import NSGA2
+from .hybrid_knsga2 import KNSGAII
 
-from src.data_parser import Customer, ProblemInstance, load_instance, parse_solomon_instance
-from src.problem import HHCProblem, Route, Solution
-from src.kmeans import KMeansClustering, Cluster
-from src.nsga2 import NSGAII, Individual
-from src.hybrid_knsga2 import KNSGAII, KNSGAIIResult, ParetoSubset
+__version__ = '2.0.0'
+__author__ = 'Research Implementation'
 
 __all__ = [
-    # Data Parser
-    'Customer', 'ProblemInstance', 'load_instance', 'parse_solomon_instance',
-    # Problem Definition
-    'HHCProblem', 'Route', 'Solution',
-    # K-means Clustering
-    'KMeansClustering', 'Cluster',
-    # NSGA-II
-    'NSGAII', 'Individual',
-    # K-NSGA-II Hybrid
-    'KNSGAII', 'KNSGAIIResult', 'ParetoSubset'
+    'HHCInstance', 
+    'Customer', 
+    'Solution',
+    'load_instance', 
+    'list_available_instances',
+    'KMeans', 
+    'NSGA2', 
+    'KNSGAII'
 ]

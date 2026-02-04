@@ -1,670 +1,434 @@
 """
 K-NSGA-II: Hybrid K-means + NSGA-II Algorithm
-Combines clustering with evolutionary optimization for HHC-MOVRPTW
+For solving HHC-MOVRPTW (Home Health Care Multi-Objective VRP with Time Windows)
 
-Based on the paper's approach:
-1. Decomposition Stage: Divide patients into K clusters using K-means
-2. Optimization Stage: Run NSGA-II on each cluster
-3. Combination Stage: Combine Pareto subsets to form global Pareto front
+Based on the paper's three-stage approach:
+1. Decomposition (K-means clustering)
+2. Optimization (NSGA-II per cluster)
+3. Combination (Merge Pareto fronts)
 """
 
-import numpy as np
-from typing import List, Tuple, Dict
-from dataclasses import dataclass
-from copy import deepcopy
+import random
+import math
 import time
-
-from src.data_parser import ProblemInstance, load_instance
-from src.problem import HHCProblem, Solution, Route
-from src.kmeans import KMeansClustering, Cluster
-from src.nsga2 import NSGAII, Individual
-
-
-@dataclass
-class ParetoSubset:
-    """Represents a Pareto subset for one cluster/caregiver"""
-    cluster_id: int
-    solutions: List[Individual]
-    customer_ids: List[int]
-    
-    @property
-    def size(self) -> int:
-        return len(self.solutions)
-    
-    def get_objective_values(self) -> List[Tuple[float, float]]:
-        return [sol.objectives for sol in self.solutions]
-
-
-@dataclass
-class KNSGAIIResult:
-    """Result container for K-NSGA-II algorithm"""
-    global_pareto_front: List[Tuple[float, float]]
-    pareto_subsets: List[ParetoSubset]
-    clusters: List[Cluster]
-    total_time: float
-    decomposition_time: float
-    optimization_time: float
-    combination_time: float
+from typing import List, Tuple, Optional, Dict
+from .problem import HHCInstance, Customer, Solution
+from .kmeans import KMeans
+from .nsga2 import NSGA2
 
 
 class KNSGAII:
     """
-    K-NSGA-II: Hybrid approach combining K-means clustering with NSGA-II.
+    K-NSGA-II: Hybrid algorithm combining K-means clustering with NSGA-II
     
-    The algorithm works in three stages:
-    
-    1. DECOMPOSITION STAGE:
-       - Divide patients into K clusters using K-means
-       - K = number of caregivers
-       - Clusters based on geographical coordinates and time preferences
-    
-    2. OPTIMIZATION STAGE:
-       - Run NSGA-II independently on each cluster
-       - Each cluster corresponds to one caregiver's route
-       - Output: K Pareto subsets (one per cluster)
-    
-    3. COMBINATION STAGE:
-       - Combine K Pareto subsets into global Pareto front
-       - Sum objective values across corresponding solutions
-       - Remove dominated solutions
+    Stage 1 (Decomposition): Use K-means to cluster customers by location
+    Stage 2 (Optimization): Run NSGA-II independently on each cluster
+    Stage 3 (Combination): Merge cluster Pareto fronts into global front
     """
     
-    def __init__(self,
-                 instance: ProblemInstance,
-                 population_size: int = 100,
-                 max_generations: int = 1000,
-                 crossover_rate: float = 0.7,
-                 mutation_rate: float = 0.2,
-                 use_time_features: bool = True,
-                 balance_clusters: bool = True,
-                 random_state: int = None):
+    def __init__(
+        self,
+        instance: HHCInstance,
+        population_size: int = 100,
+        max_generations: int = 1000,
+        crossover_rate: float = 0.9,
+        mutation_rate: float = 0.1,
+        random_state: Optional[int] = None
+    ):
         """
-        Initialize K-NSGA-II algorithm.
+        Initialize K-NSGA-II
         
         Args:
-            instance: Problem instance
-            population_size: NSGA-II population size
-            max_generations: NSGA-II max generations
-            crossover_rate: NSGA-II crossover rate
-            mutation_rate: NSGA-II mutation rate
-            use_time_features: Include time windows in clustering
-            balance_clusters: Balance cluster sizes
-            random_state: Random seed
+            instance: HHC problem instance
+            population_size: Population size for NSGA-II
+            max_generations: Max generations for NSGA-II
+            crossover_rate: Crossover probability
+            mutation_rate: Mutation probability
+            random_state: Random seed for reproducibility
         """
         self.instance = instance
         self.population_size = population_size
         self.max_generations = max_generations
         self.crossover_rate = crossover_rate
         self.mutation_rate = mutation_rate
-        self.use_time_features = use_time_features
-        self.balance_clusters = balance_clusters
         self.random_state = random_state
         
-        # Number of clusters = number of caregivers
-        self.n_clusters = instance.num_vehicles
+        if random_state is not None:
+            random.seed(random_state)
         
-        # Results
-        self.clusters: List[Cluster] = None
-        self.pareto_subsets: List[ParetoSubset] = None
-        self.global_pareto_front: List[Tuple[float, float]] = None
+        # Results storage
+        self.clusters: List[List[Customer]] = []
+        self.cluster_pareto_fronts: List[List[Solution]] = []
+        self.global_pareto_front: List[Solution] = []
+        
+        # Timing
+        self.decomposition_time: float = 0.0
+        self.optimization_time: float = 0.0
+        self.combination_time: float = 0.0
     
-    def _decomposition_stage(self, verbose: bool = True) -> List[Cluster]:
+    def _decomposition_stage(self, verbose: bool = False) -> List[List[Customer]]:
         """
-        Stage 1: Decompose problem using K-means clustering.
+        Stage 1: Decomposition using K-means clustering
+        
+        Clusters customers based on geographic location.
+        Number of clusters equals number of caregivers.
         """
+        start_time = time.time()
+        
+        k = self.instance.num_vehicles  # Number of clusters = number of caregivers
+        
         if verbose:
             print("\n" + "=" * 60)
             print("STAGE 1: DECOMPOSITION (K-means Clustering)")
             print("=" * 60)
         
-        kmeans = KMeansClustering(
-            n_clusters=self.n_clusters,
-            max_iterations=100,
-            use_time_features=self.use_time_features,
-            random_state=self.random_state
-        )
+        # Run K-means
+        kmeans = KMeans(k=k, max_iterations=100, random_state=self.random_state)
+        kmeans.fit(self.instance.customers)
         
-        clusters = kmeans.fit(self.instance)
-        
-        if self.balance_clusters:
-            clusters = kmeans.get_balanced_clusters(self.instance)
+        self.clusters = kmeans.get_clusters()
         
         if verbose:
-            print(f"\nClusters created: {len(clusters)}")
-            for cluster in clusters:
-                customer_ids = kmeans.get_cluster_customer_ids(cluster.id)
-                print(f"  Cluster {cluster.id}: {cluster.size} customers - IDs: {customer_ids}")
+            print(f"\nClusters created: {len(self.clusters)}")
+            for i, cluster in enumerate(self.clusters):
+                ids = [c.id for c in cluster]
+                print(f"  Cluster {i}: {len(cluster)} customers - IDs: {ids}")
         
-        self.clusters = clusters
-        self.kmeans = kmeans
-        return clusters
+        self.decomposition_time = time.time() - start_time
+        
+        return self.clusters
     
-    def _optimization_stage(self, verbose: bool = True) -> List[ParetoSubset]:
+    def _optimization_stage(self, verbose: bool = False) -> List[List[Solution]]:
         """
-        Stage 2: Run NSGA-II on each cluster.
+        Stage 2: Optimization using NSGA-II on each cluster
+        
+        Runs NSGA-II independently on each cluster to find
+        Pareto-optimal solutions for that sub-problem.
         """
+        start_time = time.time()
+        
         if verbose:
             print("\n" + "=" * 60)
             print("STAGE 2: OPTIMIZATION (NSGA-II per cluster)")
             print("=" * 60)
         
-        pareto_subsets = []
+        self.cluster_pareto_fronts = []
         
-        for cluster in self.clusters:
+        for i, cluster in enumerate(self.clusters):
             if verbose:
-                print(f"\n--- Optimizing Cluster {cluster.id} ({cluster.size} customers) ---")
+                print(f"\n--- Optimizing Cluster {i} ({len(cluster)} customers) ---")
             
-            # Get customer IDs for this cluster
-            customer_ids = self.kmeans.get_cluster_customer_ids(cluster.id)
-            
-            if len(customer_ids) == 0:
-                if verbose:
-                    print("  Empty cluster, skipping...")
+            if not cluster:
+                self.cluster_pareto_fronts.append([])
                 continue
             
-            # Create sub-problem for this cluster
-            sub_problem = self._create_sub_problem(customer_ids)
-            
-            # Run NSGA-II on sub-problem
-            nsga2 = NSGAII(
-                problem=sub_problem,
+            # Create NSGA-II instance for this cluster
+            nsga2 = NSGA2(
+                instance=self.instance,
+                customers=cluster,
                 population_size=self.population_size,
                 max_generations=self.max_generations,
                 crossover_rate=self.crossover_rate,
                 mutation_rate=self.mutation_rate,
-                random_state=self.random_state + cluster.id if self.random_state else None
+                random_state=self.random_state + i if self.random_state else None
             )
-            
-            # Set customer subset
-            nsga2.set_customer_subset(customer_ids)
             
             # Run optimization
             pareto_front = nsga2.run(verbose=False)
-            
-            # Create Pareto subset
-            pareto_subset = ParetoSubset(
-                cluster_id=cluster.id,
-                solutions=pareto_front,
-                customer_ids=customer_ids
-            )
-            pareto_subsets.append(pareto_subset)
+            self.cluster_pareto_fronts.append(pareto_front)
             
             if verbose:
                 print(f"  Pareto front size: {len(pareto_front)}")
                 if pareto_front:
-                    best_f1 = min(s.objectives[0] for s in pareto_front)
-                    best_f2 = min(s.objectives[1] for s in pareto_front)
+                    best_f1 = min(s.f1 for s in pareto_front)
+                    best_f2 = min(s.f2 for s in pareto_front)
                     print(f"  Best F1: {best_f1:.2f}, Best F2: {best_f2:.2f}")
         
-        self.pareto_subsets = pareto_subsets
-        return pareto_subsets
+        self.optimization_time = time.time() - start_time
+        
+        return self.cluster_pareto_fronts
     
-    def _create_sub_problem(self, customer_ids: List[int]) -> HHCProblem:
-        """Create a sub-problem for a specific cluster of customers."""
-        # Create a modified problem with only the cluster's customers
-        # The sub-problem uses 1 caregiver
-        
-        sub_problem = HHCProblem(
-            self.instance,
-            max_workload=self.instance.depot.due_date
-        )
-        
-        # Override number of caregivers for sub-problem
-        sub_problem.num_caregivers = 1
-        sub_problem.num_customers = len(customer_ids)
-        sub_problem.max_patients_per_caregiver = len(customer_ids)
-        
-        return sub_problem
-    
-    def _combination_stage(self, verbose: bool = True) -> List[Tuple[float, float]]:
+    def _combination_stage(self, verbose: bool = False) -> List[Solution]:
         """
-        Stage 3: Combine Pareto subsets into global Pareto front.
+        Stage 3: Combination of cluster Pareto fronts
         
-        Algorithm:
-        1. Generate diverse combinations from all Pareto subsets
-        2. Sum objective values across corresponding solutions
-        3. Remove dominated solutions
+        Combines solutions from all cluster Pareto fronts
+        to form the global Pareto front.
         
-        Enhanced with multiple combination strategies for better coverage.
+        Uses Cartesian product approach to generate combined solutions.
         """
+        start_time = time.time()
+        
         if verbose:
             print("\n" + "=" * 60)
             print("STAGE 3: COMBINATION (Global Pareto Front)")
             print("=" * 60)
         
-        if not self.pareto_subsets:
-            return []
+        # Get minimum Pareto front size (T in the paper)
+        non_empty_fronts = [f for f in self.cluster_pareto_fronts if f]
+        if not non_empty_fronts:
+            self.global_pareto_front = []
+            self.combination_time = time.time() - start_time
+            return self.global_pareto_front
         
-        # Generate many combinations
-        global_solutions = []
-        
-        # Collect non-empty subsets
-        valid_subsets = [ps for ps in self.pareto_subsets if ps.size > 0]
-        
-        if not valid_subsets:
-            return []
-        
-        # Sort each Pareto subset by F1
-        sorted_by_f1 = [sorted(ps.solutions, key=lambda s: s.objectives[0]) for ps in valid_subsets]
-        
-        # Sort each by F2
-        sorted_by_f2 = [sorted(ps.solutions, key=lambda s: s.objectives[1]) for ps in valid_subsets]
-        
-        # Find minimum subset size
-        T = min(len(ss) for ss in sorted_by_f1)
+        T = min(len(f) for f in non_empty_fronts)
         
         if verbose:
             print(f"\nMinimum Pareto subset size (T): {T}")
-            print(f"Number of Pareto subsets: {len(valid_subsets)}")
+            print(f"Number of Pareto subsets: {len(non_empty_fronts)}")
         
-        # Method 1: Combine at same positions (sorted by F1)
-        for t in range(T):
-            total_f1 = sum(ss[t].objectives[0] for ss in sorted_by_f1)
-            total_f2 = sum(ss[t].objectives[1] for ss in sorted_by_f1)
-            global_solutions.append((total_f1, total_f2))
+        # Generate combined solutions
+        combined_solutions = []
         
-        # Method 2: Combine at same positions (sorted by F2)
-        for t in range(T):
-            total_f1 = sum(ss[t].objectives[0] for ss in sorted_by_f2)
-            total_f2 = sum(ss[t].objectives[1] for ss in sorted_by_f2)
-            global_solutions.append((total_f1, total_f2))
+        # Take top T solutions from each front (sorted by crowding distance)
+        pareto_subsets = []
+        for front in non_empty_fronts:
+            # Sort by a combination of objectives for diversity
+            sorted_front = sorted(front, key=lambda s: (s.rank, -s.crowding_distance))[:T]
+            pareto_subsets.append(sorted_front)
         
-        # Method 3: Extreme combinations
-        # Best F1 overall
-        best_f1_total = sum(min(s.objectives[0] for s in ss) for ss in sorted_by_f1)
-        best_f2_for_best_f1 = sum(
-            min(ss, key=lambda s: s.objectives[0]).objectives[1] 
-            for ss in sorted_by_f1
-        )
-        global_solutions.append((best_f1_total, best_f2_for_best_f1))
+        # Generate combinations (Cartesian product approach)
+        # To avoid exponential explosion, we use sampling
+        max_combinations = 5000
+        num_subsets = len(pareto_subsets)
         
-        # Best F2 overall
-        best_f2_total = sum(min(s.objectives[1] for s in ss) for ss in sorted_by_f2)
-        best_f1_for_best_f2 = sum(
-            min(ss, key=lambda s: s.objectives[1]).objectives[0] 
-            for ss in sorted_by_f2
-        )
-        global_solutions.append((best_f1_for_best_f2, best_f2_total))
+        if num_subsets == 0:
+            self.global_pareto_front = []
+            self.combination_time = time.time() - start_time
+            return self.global_pareto_front
         
-        # Method 4: Weighted combinations along Pareto front (more granular)
-        for alpha in np.linspace(0, 1, 50):  # 50 weight combinations
-            total_f1 = 0.0
-            total_f2 = 0.0
-            for ss in sorted_by_f1:
-                # Normalize objectives within this subset
-                f1_vals = [s.objectives[0] for s in ss]
-                f2_vals = [s.objectives[1] for s in ss]
-                f1_min, f1_max = min(f1_vals), max(f1_vals)
-                f2_min, f2_max = min(f2_vals), max(f2_vals)
-                f1_range = f1_max - f1_min if f1_max != f1_min else 1
-                f2_range = f2_max - f2_min if f2_max != f2_min else 1
-                
-                # Select solution minimizing weighted sum
-                best_sol = min(ss, key=lambda s: 
-                    alpha * (s.objectives[0] - f1_min) / f1_range + 
-                    (1-alpha) * (s.objectives[1] - f2_min) / f2_range
-                )
-                total_f1 += best_sol.objectives[0]
-                total_f2 += best_sol.objectives[1]
-            global_solutions.append((total_f1, total_f2))
-        
-        # Method 5: Random sampling with more samples
-        n_samples = max(200, T * len(valid_subsets) * 5)
-        for _ in range(n_samples):
-            total_f1 = 0.0
-            total_f2 = 0.0
-            for ss in sorted_by_f1:
-                idx = np.random.randint(0, len(ss))
-                total_f1 += ss[idx].objectives[0]
-                total_f2 += ss[idx].objectives[1]
-            global_solutions.append((total_f1, total_f2))
-        
-        # Method 6: All combinations of extremes
-        # Generate all 2^k combinations of best-F1 vs best-F2 from each cluster
-        from itertools import product
-        extreme_choices = []
-        for ss in sorted_by_f1:
-            best_f1_sol = min(ss, key=lambda s: s.objectives[0])
-            best_f2_sol = min(ss, key=lambda s: s.objectives[1])
-            extreme_choices.append([best_f1_sol, best_f2_sol])
-        
-        # Limit combinations if too many
-        if len(valid_subsets) <= 8:  # 2^8 = 256 combinations
-            for combo in product(*extreme_choices):
-                total_f1 = sum(s.objectives[0] for s in combo)
-                total_f2 = sum(s.objectives[1] for s in combo)
-                global_solutions.append((total_f1, total_f2))
-        
-        # Method 7: Cross-combinations at different positions
-        for offset in range(T):
-            total_f1 = 0.0
-            total_f2 = 0.0
-            for i, ss in enumerate(sorted_by_f1):
-                idx = (offset + i) % len(ss)
-                total_f1 += ss[idx].objectives[0]
-                total_f2 += ss[idx].objectives[1]
-            global_solutions.append((total_f1, total_f2))
-        
-        # Remove duplicates (round to avoid floating point issues)
-        unique_solutions = list(set((round(f1, 4), round(f2, 4)) for f1, f2 in global_solutions))
-        
-        # Remove dominated solutions
-        non_dominated = self._get_non_dominated(unique_solutions)
+        # Generate combinations
+        for _ in range(max_combinations):
+            # Pick one solution from each Pareto subset
+            selected = [random.choice(subset) for subset in pareto_subsets]
+            
+            # Combine into a global solution
+            combined = self._merge_solutions(selected)
+            if combined:
+                combined_solutions.append(combined)
         
         if verbose:
-            print(f"\nTotal combinations generated: {len(global_solutions)}")
-            print(f"Unique solutions: {len(unique_solutions)}")
-            print(f"Non-dominated solutions: {len(non_dominated)}")
+            print(f"\nTotal combinations generated: {len(combined_solutions)}")
         
-        self.global_pareto_front = non_dominated
-        return non_dominated
+        # Remove duplicates and find non-dominated solutions
+        unique_solutions = self._remove_duplicates(combined_solutions)
+        
+        if verbose:
+            print(f"Unique solutions: {len(unique_solutions)}")
+        
+        # Extract global Pareto front (non-dominated solutions)
+        self.global_pareto_front = self._extract_pareto_front(unique_solutions)
+        
+        if verbose:
+            print(f"Non-dominated solutions: {len(self.global_pareto_front)}")
+        
+        self.combination_time = time.time() - start_time
+        
+        return self.global_pareto_front
     
-    def _get_non_dominated(self, solutions: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
-        """Get non-dominated solutions from a list of (F1, F2) tuples."""
-        non_dominated = []
+    def _merge_solutions(self, solutions: List[Solution]) -> Optional[Solution]:
+        """Merge solutions from different clusters into one global solution"""
+        merged = Solution(self.instance)
+        merged.routes = []
+        total_f1 = 0.0
+        total_f2 = 0.0
+        
+        for sol in solutions:
+            for route in sol.routes:
+                if route:
+                    merged.routes.append(route.copy())
+            total_f1 += sol.f1
+            total_f2 += sol.f2
+        
+        merged.f1 = total_f1
+        merged.f2 = total_f2
+        
+        return merged
+    
+    def _remove_duplicates(self, solutions: List[Solution]) -> List[Solution]:
+        """Remove duplicate solutions based on objective values"""
+        unique = []
+        seen = set()
+        
+        for sol in solutions:
+            key = (round(sol.f1, 2), round(sol.f2, 2))
+            if key not in seen:
+                seen.add(key)
+                unique.append(sol)
+        
+        return unique
+    
+    def _extract_pareto_front(self, solutions: List[Solution]) -> List[Solution]:
+        """Extract non-dominated solutions (Pareto front)"""
+        if not solutions:
+            return []
+        
+        pareto_front = []
         
         for sol in solutions:
             is_dominated = False
+            to_remove = []
             
-            for other in solutions:
-                if other != sol:
-                    # Check if other dominates sol
-                    if (other[0] <= sol[0] and other[1] <= sol[1] and
-                        (other[0] < sol[0] or other[1] < sol[1])):
-                        is_dominated = True
-                        break
+            for pf_sol in pareto_front:
+                if pf_sol.dominates(sol):
+                    is_dominated = True
+                    break
+                elif sol.dominates(pf_sol):
+                    to_remove.append(pf_sol)
             
             if not is_dominated:
-                non_dominated.append(sol)
+                pareto_front = [s for s in pareto_front if s not in to_remove]
+                pareto_front.append(sol)
         
-        return non_dominated
+        # Sort by F1 for consistent output
+        pareto_front.sort(key=lambda s: s.f1)
+        
+        return pareto_front
     
-    def run(self, verbose: bool = True) -> KNSGAIIResult:
+    def run(self, verbose: bool = True) -> List[Solution]:
         """
-        Run the complete K-NSGA-II algorithm.
+        Run the complete K-NSGA-II algorithm
+        
+        Args:
+            verbose: Print progress information
         
         Returns:
-            KNSGAIIResult containing all results and timing information
+            Global Pareto front
         """
-        start_time = time.time()
-        
         if verbose:
             print("\n" + "=" * 60)
             print("K-NSGA-II: Hybrid K-means + NSGA-II Algorithm")
             print("=" * 60)
             print(f"\nInstance: {self.instance.name}")
             print(f"Customers: {self.instance.num_customers}")
-            print(f"Caregivers/Clusters: {self.n_clusters}")
+            print(f"Caregivers/Clusters: {self.instance.num_vehicles}")
             print(f"Population size: {self.population_size}")
             print(f"Max generations: {self.max_generations}")
         
         # Stage 1: Decomposition
-        decomp_start = time.time()
         self._decomposition_stage(verbose)
-        decomp_time = time.time() - decomp_start
         
         # Stage 2: Optimization
-        opt_start = time.time()
         self._optimization_stage(verbose)
-        opt_time = time.time() - opt_start
         
         # Stage 3: Combination
-        comb_start = time.time()
         self._combination_stage(verbose)
-        comb_time = time.time() - comb_start
         
-        total_time = time.time() - start_time
-        
+        # Print results
         if verbose:
-            print("\n" + "=" * 60)
-            print("K-NSGA-II RESULTS")
-            print("=" * 60)
-            print(f"\nGlobal Pareto Front ({len(self.global_pareto_front)} solutions):")
-            for i, (f1, f2) in enumerate(sorted(self.global_pareto_front)):
-                print(f"  {i+1}. F1={f1:.2f}, F2={f2:.2f}")
-            
-            print(f"\nTiming:")
-            print(f"  Decomposition: {decomp_time:.2f}s")
-            print(f"  Optimization:  {opt_time:.2f}s")
-            print(f"  Combination:   {comb_time:.2f}s")
-            print(f"  Total:         {total_time:.2f}s")
+            self._print_results()
         
-        return KNSGAIIResult(
-            global_pareto_front=self.global_pareto_front,
-            pareto_subsets=self.pareto_subsets,
-            clusters=self.clusters,
-            total_time=total_time,
-            decomposition_time=decomp_time,
-            optimization_time=opt_time,
-            combination_time=comb_time
-        )
+        return self.global_pareto_front
+    
+    def _print_results(self):
+        """Print final results"""
+        print("\n" + "=" * 60)
+        print("K-NSGA-II RESULTS")
+        print("=" * 60)
+        
+        print(f"\nGlobal Pareto Front ({len(self.global_pareto_front)} solutions):")
+        for i, sol in enumerate(self.global_pareto_front[:20]):  # Show first 20
+            print(f"  {i+1}. F1={sol.f1:.2f}, F2={sol.f2:.2f}")
+        
+        if len(self.global_pareto_front) > 20:
+            print(f"  ... and {len(self.global_pareto_front) - 20} more solutions")
+        
+        total_time = self.decomposition_time + self.optimization_time + self.combination_time
+        print(f"\nTiming:")
+        print(f"  Decomposition: {self.decomposition_time:.2f}s")
+        print(f"  Optimization:  {self.optimization_time:.2f}s")
+        print(f"  Combination:   {self.combination_time:.2f}s")
+        print(f"  Total:         {total_time:.2f}s")
+    
+    def get_pareto_front(self) -> List[Solution]:
+        """Return the global Pareto front"""
+        return self.global_pareto_front
     
     def get_performance_metrics(self) -> Dict:
-        """Calculate performance metrics for the result."""
+        """
+        Calculate performance metrics for the Pareto front
+        
+        Returns:
+            Dictionary with hypervolume, spacing, and other metrics
+        """
         if not self.global_pareto_front:
-            return {}
+            return {
+                'hypervolume': 0.0,
+                'spacing': 0.0,
+                'pareto_size': 0,
+                'best_f1': float('inf'),
+                'best_f2': float('inf')
+            }
         
-        # Pareto front size
-        pf_size = len(self.global_pareto_front)
+        # Get objective values
+        f1_values = [s.f1 for s in self.global_pareto_front]
+        f2_values = [s.f2 for s in self.global_pareto_front]
         
-        # Spacing metric (SP) - normalized
-        sp = self._calculate_spacing()
+        # Hypervolume calculation (normalized)
+        # Reference point is set to max values * 1.1
+        f1_max = max(f1_values) * 1.1
+        f2_max = max(f2_values) * 1.1
+        f1_min = min(f1_values)
+        f2_min = min(f2_values)
         
-        # Hypervolume (normalized to [0,1]) - as per paper
-        hv = self._calculate_hypervolume_normalized()
+        # Normalize to [0, 1]
+        f1_range = f1_max - f1_min if f1_max > f1_min else 1
+        f2_range = f2_max - f2_min if f2_max > f2_min else 1
+        
+        normalized_points = [
+            ((f1 - f1_min) / f1_range, (f2 - f2_min) / f2_range)
+            for f1, f2 in zip(f1_values, f2_values)
+        ]
+        
+        # Sort by first objective for hypervolume calculation
+        normalized_points.sort(key=lambda p: p[0])
+        
+        # Calculate hypervolume (area dominated by Pareto front)
+        # Reference point at (1.1, 1.1) after normalization
+        ref_point = (1.1, 1.1)
+        hypervolume = 0.0
+        
+        prev_x = 0.0
+        for i, (x, y) in enumerate(normalized_points):
+            # Add rectangle from previous x to current x
+            width = x - prev_x
+            height = ref_point[1] - y
+            if width > 0 and height > 0:
+                hypervolume += width * height
+            prev_x = x
+        
+        # Add final rectangle to reference point
+        if prev_x < ref_point[0]:
+            last_y = normalized_points[-1][1] if normalized_points else ref_point[1]
+            hypervolume += (ref_point[0] - prev_x) * (ref_point[1] - last_y)
+        
+        # Normalize hypervolume to [0, 1]
+        max_hv = ref_point[0] * ref_point[1]
+        hypervolume = hypervolume / max_hv if max_hv > 0 else 0
+        
+        # Spacing metric (uniformity of distribution)
+        spacing = 0.0
+        if len(self.global_pareto_front) > 1:
+            distances = []
+            for i, (x1, y1) in enumerate(normalized_points):
+                min_dist = float('inf')
+                for j, (x2, y2) in enumerate(normalized_points):
+                    if i != j:
+                        dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
+                        min_dist = min(min_dist, dist)
+                if min_dist < float('inf'):
+                    distances.append(min_dist)
+            
+            if distances:
+                d_mean = sum(distances) / len(distances)
+                spacing = math.sqrt(
+                    sum((d - d_mean)**2 for d in distances) / len(distances)
+                )
         
         return {
-            'pareto_size': pf_size,
-            'spacing': sp,
-            'hypervolume': hv,
-            'best_f1': min(s[0] for s in self.global_pareto_front),
-            'best_f2': min(s[1] for s in self.global_pareto_front)
+            'hypervolume': hypervolume,
+            'spacing': spacing,
+            'pareto_size': len(self.global_pareto_front),
+            'best_f1': min(f1_values),
+            'best_f2': min(f2_values)
         }
-    
-    def _calculate_spacing(self) -> float:
-        """Calculate spacing metric (SP) for diversity assessment."""
-        if len(self.global_pareto_front) <= 1:
-            return 0.0
-        
-        # Normalize objectives
-        f1_vals = [s[0] for s in self.global_pareto_front]
-        f2_vals = [s[1] for s in self.global_pareto_front]
-        
-        f1_min, f1_max = min(f1_vals), max(f1_vals)
-        f2_min, f2_max = min(f2_vals), max(f2_vals)
-        
-        f1_range = f1_max - f1_min if f1_max != f1_min else 1
-        f2_range = f2_max - f2_min if f2_max != f2_min else 1
-        
-        normalized = [((s[0] - f1_min) / f1_range, (s[1] - f2_min) / f2_range)
-                      for s in self.global_pareto_front]
-        
-        # Calculate minimum distances
-        distances = []
-        for i, sol in enumerate(normalized):
-            min_dist = float('inf')
-            for j, other in enumerate(normalized):
-                if i != j:
-                    dist = np.sqrt((sol[0] - other[0])**2 + (sol[1] - other[1])**2)
-                    min_dist = min(min_dist, dist)
-            distances.append(min_dist)
-        
-        # Calculate spacing
-        mean_dist = np.mean(distances)
-        sp = np.sqrt(sum((d - mean_dist)**2 for d in distances) / len(distances))
-        
-        return sp
-    
-    def _calculate_hypervolume_normalized(self) -> float:
-        """
-        Calculate normalized hypervolume indicator as per the paper.
-        
-        The paper methodology:
-        1. Estimate theoretical bounds for F1 and F2 from the problem instance
-        2. Normalize all Pareto front points to [0, 1]
-        3. Use reference point (1, 1) representing worst case
-        4. Calculate hypervolume as area dominated by the Pareto front
-        
-        Key insight: The paper likely uses consistent bounds derived from
-        the problem's theoretical worst-case values, not dynamic bounds.
-        """
-        if not self.global_pareto_front or len(self.global_pareto_front) < 1:
-            return 0.0
-        
-        # Get objective values from current Pareto front
-        f1_vals = [s[0] for s in self.global_pareto_front]
-        f2_vals = [s[1] for s in self.global_pareto_front]
-        
-        # Calculate theoretical bounds based on problem structure
-        # These should be consistent across all runs for fair comparison
-        
-        # F1 (total service time = travel + service):
-        # Theoretical minimum: sum of all service times + minimal possible travel
-        total_service_time = sum(c.service_time for c in self.instance.customers)
-        
-        # Estimate minimum possible travel time using nearest neighbor heuristic idea
-        # Best case: very short paths between clustered customers
-        avg_coord = np.mean([[c.x, c.y] for c in self.instance.customers], axis=0)
-        depot_dist = np.sqrt(self.instance.depot.x**2 + self.instance.depot.y**2)
-        
-        # F1 theoretical minimum: must do all service + some travel
-        f1_theoretical_min = total_service_time * 0.8  # Allow some margin
-        
-        # F1 theoretical maximum: worst case routing
-        # Estimate as visiting all in worst order
-        max_possible_travel = 0
-        for c in self.instance.customers:
-            dist_from_depot = np.sqrt((c.x - self.instance.depot.x)**2 + 
-                                       (c.y - self.instance.depot.y)**2)
-            max_possible_travel += dist_from_depot * 2  # worst case: depot to each customer and back
-        f1_theoretical_max = total_service_time + max_possible_travel
-        
-        # F2 (tardiness):
-        # Theoretical minimum: 0 (all customers served in their time windows)
-        f2_theoretical_min = 0.0
-        
-        # Theoretical maximum: sum of maximum possible tardiness for each customer
-        f2_theoretical_max = 0.0
-        planning_horizon = self.instance.depot.due_date
-        for c in self.instance.customers:
-            # Max tardiness = if served at end of horizon
-            max_late = max(0, planning_horizon - c.due_date)
-            max_early = c.ready_time  # If served at time 0
-            f2_theoretical_max += max_late + max_early
-        f2_theoretical_max = max(f2_theoretical_max, 1.0)  # Ensure non-zero
-        
-        # Use observed values to adjust bounds (take wider range)
-        f1_min = min(f1_theoretical_min, min(f1_vals) * 0.9)
-        f1_max = max(f1_theoretical_max, max(f1_vals) * 1.1)
-        f2_min = f2_theoretical_min
-        f2_max = max(f2_theoretical_max, max(f2_vals) * 1.1) if max(f2_vals) > 0 else f2_theoretical_max
-        
-        # Ensure ranges are valid
-        f1_range = f1_max - f1_min if f1_max > f1_min else 1.0
-        f2_range = f2_max - f2_min if f2_max > f2_min else 1.0
-        
-        # Normalize to [0, 1] using global bounds
-        normalized = []
-        for s in self.global_pareto_front:
-            norm_f1 = (s[0] - f1_min) / f1_range
-            norm_f2 = (s[1] - f2_min) / f2_range
-            # Clamp to [0, 1]
-            norm_f1 = max(0.0, min(1.0, norm_f1))
-            norm_f2 = max(0.0, min(1.0, norm_f2))
-            normalized.append((norm_f1, norm_f2))
-        
-        # Reference point is (1, 1) in normalized space
-        ref_point = (1.0, 1.0)
-        
-        # Sort by first objective (ascending), then by second (descending)
-        sorted_front = sorted(normalized, key=lambda x: (x[0], -x[1]))
-        
-        # Remove dominated points in normalized space
-        non_dominated = []
-        for p in sorted_front:
-            if not non_dominated or p[1] < non_dominated[-1][1]:
-                non_dominated.append(p)
-        
-        # Calculate hypervolume using standard 2D algorithm
-        # Compute area dominated by the Pareto front (area between front and reference)
-        hv = 0.0
-        prev_f1 = 0.0
-        
-        for (f1, f2) in non_dominated:
-            if f1 < ref_point[0] and f2 < ref_point[1]:
-                # Add rectangle: width from prev_f1 to f1, height from f2 to ref_point[1]
-                width = f1 - prev_f1
-                height = ref_point[1] - f2
-                hv += width * height
-                prev_f1 = f1
-        
-        # Add final rectangle from last point to reference point
-        if non_dominated:
-            last_f1, last_f2 = non_dominated[-1]
-            if last_f1 < ref_point[0] and last_f2 < ref_point[1]:
-                hv += (ref_point[0] - last_f1) * (ref_point[1] - last_f2)
-        
-        return hv
-    
-    def _calculate_hypervolume(self, ref_point: Tuple[float, float] = None) -> float:
-        """Calculate hypervolume indicator for convergence assessment."""
-        if not self.global_pareto_front:
-            return 0.0
-        
-        # Set reference point as worst values + margin
-        if ref_point is None:
-            max_f1 = max(s[0] for s in self.global_pareto_front)
-            max_f2 = max(s[1] for s in self.global_pareto_front)
-            ref_point = (max_f1 * 1.1, max_f2 * 1.1)
-        
-        # Sort by first objective
-        sorted_front = sorted(self.global_pareto_front, key=lambda x: x[0])
-        
-        # Calculate hypervolume using simple rectangle method
-        hv = 0.0
-        prev_f1 = 0.0
-        
-        for f1, f2 in sorted_front:
-            if f1 < ref_point[0] and f2 < ref_point[1]:
-                width = f1 - prev_f1
-                height = ref_point[1] - f2
-                hv += width * height
-                prev_f1 = f1
-        
-        # Add final rectangle
-        if sorted_front:
-            hv += (ref_point[0] - sorted_front[-1][0]) * (ref_point[1] - sorted_front[-1][1])
-        
-        return hv
-
-
-if __name__ == "__main__":
-    # Test K-NSGA-II
-    print("Testing K-NSGA-II Hybrid Algorithm")
-    print("=" * 60)
-    
-    # Load test instance
-    instance = load_instance("C101.25")
-    
-    # Run K-NSGA-II with reduced parameters for testing
-    knsga2 = KNSGAII(
-        instance=instance,
-        population_size=50,
-        max_generations=100,
-        crossover_rate=0.7,
-        mutation_rate=0.2,
-        use_time_features=True,
-        balance_clusters=True,
-        random_state=42
-    )
-    
-    result = knsga2.run(verbose=True)
-    
-    # Calculate metrics
-    metrics = knsga2.get_performance_metrics()
-    print("\nPerformance Metrics:")
-    for key, value in metrics.items():
-        if isinstance(value, float):
-            print(f"  {key}: {value:.4f}")
-        else:
-            print(f"  {key}: {value}")

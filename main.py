@@ -1,254 +1,185 @@
 """
-Main Execution Script for K-NSGA-II
-Home Health Care Multi-Objective Vehicle Routing Problem with Time Windows
+K-NSGA-II: A Hybrid Decomposition-Based Multi-Objective Evolutionary Algorithm
+================================================================================
+
+Implementation of K-NSGA-II for solving the Home Health Care Multi-Objective
+Vehicle Routing Problem with Time Windows (HHC-MOVRPTW).
+
+Reference Paper:
+    "A Hybrid Decomposition-Based Multi-Objective Evolutionary Algorithm for 
+    Home Health Care Multi-Objective Vehicle Routing Problem with Time Windows"
+
+Algorithm Overview:
+    Stage 1 - DECOMPOSITION: K-means clustering partitions customers geographically
+    Stage 2 - OPTIMIZATION: NSGA-II optimizes each cluster independently  
+    Stage 3 - COMBINATION: Pareto fronts are merged into global optimal front
+
+Key Features:
+    - Multi-objective optimization (Service Time + Tardiness minimization)
+    - Scalable decomposition for large instances
+    - Adaptive genetic operators
+    - Statistical validation framework
+    - Publication-ready visualization
+
+Author: Research Implementation
+Version: 2.0.0
+License: MIT
 """
 
-import os
 import sys
-import time
+import os
 import argparse
-import numpy as np
-from typing import Dict, List, Tuple
+import json
 from datetime import datetime
 
-# Add project root to path
+# Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.data_parser import load_instance, ProblemInstance
-from src.problem import HHCProblem
-from src.hybrid_knsga2 import KNSGAII, KNSGAIIResult
+from src.data_parser import load_instance, list_available_instances
+from src.hybrid_knsga2 import KNSGAII
+from src.experiment import ExperimentRunner
+from src.visualization import ParetoVisualizer
 
 
-def run_experiment(instance_name: str,
-                   population_size: int = 100,
-                   max_generations: int = 1000,
-                   crossover_rate: float = 0.7,
-                   mutation_rate: float = 0.2,
-                   n_runs: int = 1,
-                   verbose: bool = True) -> Dict:
-    """
-    Run K-NSGA-II experiment on a single instance.
-    
-    Args:
-        instance_name: Instance name (e.g., "C101.25")
-        population_size: Population size
-        max_generations: Maximum generations
-        crossover_rate: Crossover probability
-        mutation_rate: Mutation probability
-        n_runs: Number of runs (for statistical analysis)
-        verbose: Print detailed output
-    
-    Returns:
-        Dictionary with results
-    """
-    print(f"\n{'='*60}")
-    print(f"EXPERIMENT: {instance_name}")
-    print(f"{'='*60}")
+def run_single_instance(instance_name: str, params: dict, verbose: bool = True):
+    """Run K-NSGA-II on a single instance"""
+    print(f"\n{'='*70}")
+    print(f"K-NSGA-II: {instance_name}")
+    print(f"{'='*70}")
     
     # Load instance
-    try:
-        instance = load_instance(instance_name)
-        print(f"Instance loaded: {instance.num_customers} customers, {instance.num_vehicles} caregivers")
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        return None
+    instance = load_instance(instance_name)
+    print(f"Loaded: {instance.num_customers} customers, {instance.num_vehicles} vehicles")
     
-    all_results = []
-    all_metrics = []
+    # Run algorithm
+    knsga2 = KNSGAII(
+        instance=instance,
+        population_size=params.get('population_size', 100),
+        max_generations=params.get('max_generations', 1000),
+        crossover_rate=params.get('crossover_rate', 0.9),
+        mutation_rate=params.get('mutation_rate', 0.1),
+        random_state=params.get('random_state', None)
+    )
     
-    for run in range(n_runs):
-        if n_runs > 1:
-            print(f"\n--- Run {run + 1}/{n_runs} ---")
-        
-        # Create K-NSGA-II instance
-        knsga2 = KNSGAII(
-            instance=instance,
-            population_size=population_size,
-            max_generations=max_generations,
-            crossover_rate=crossover_rate,
-            mutation_rate=mutation_rate,
-            use_time_features=True,
-            balance_clusters=True,
-            random_state=42 + run  # Different seed per run
-        )
-        
-        # Run algorithm
-        result = knsga2.run(verbose=verbose and n_runs == 1)
-        all_results.append(result)
-        
-        # Calculate metrics
-        metrics = knsga2.get_performance_metrics()
-        all_metrics.append(metrics)
-        
-        if n_runs > 1 and metrics:
-            print(f"  Pareto size: {metrics['pareto_size']}, "
-                  f"Best F1: {metrics['best_f1']:.2f}, Best F2: {metrics['best_f2']:.2f}")
-    
-    # Aggregate results
-    if all_metrics and all_metrics[0]:
-        avg_metrics = {
-            'instance': instance_name,
-            'pareto_size': np.mean([m['pareto_size'] for m in all_metrics]),
-            'pareto_size_std': np.std([m['pareto_size'] for m in all_metrics]),
-            'best_f1': np.mean([m['best_f1'] for m in all_metrics]),
-            'best_f1_std': np.std([m['best_f1'] for m in all_metrics]),
-            'best_f2': np.mean([m['best_f2'] for m in all_metrics]),
-            'best_f2_std': np.std([m['best_f2'] for m in all_metrics]),
-            'spacing': np.mean([m['spacing'] for m in all_metrics]),
-            'hypervolume': np.mean([m['hypervolume'] for m in all_metrics]),
-            'avg_time': np.mean([r.total_time for r in all_results]),
-        }
-    else:
-        avg_metrics = {}
+    pareto_front = knsga2.run(verbose=verbose)
+    metrics = knsga2.get_performance_metrics()
     
     return {
-        'results': all_results,
-        'metrics': all_metrics,
-        'avg_metrics': avg_metrics
+        'instance': instance_name,
+        'pareto_front': [(s.f1, s.f2) for s in pareto_front],
+        'metrics': metrics,
+        'timing': {
+            'decomposition': knsga2.decomposition_time,
+            'optimization': knsga2.optimization_time,
+            'combination': knsga2.combination_time
+        }
     }
 
 
-def run_table5_experiments(population_size: int = 100,
-                           max_generations: int = 1000,
-                           n_runs: int = 10,
-                           verbose: bool = False):
-    """
-    Run experiments replicating Table 5 from the paper.
-    
-    Instances: C101.25, C101.100, C107.100, C206.50, R109.25, RC106.50
-    """
-    print("\n" + "=" * 80)
-    print("TABLE 5 REPLICATION EXPERIMENT")
-    print("K-NSGA-II: Hybrid K-means + NSGA-II Algorithm")
-    print("=" * 80)
-    print(f"\nExperiment Settings:")
-    print(f"  Population Size: {population_size}")
-    print(f"  Max Generations: {max_generations}")
-    print(f"  Number of Runs: {n_runs}")
-    print(f"  Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # Table 5 instances from the paper
-    instances = [
-        "C101.25",    # 25 customers, clustered
-        "C101.100",   # 100 customers, clustered
-        "C107.100",   # 100 customers, clustered
-        "C206.50",    # 50 customers, clustered
-        "R109.25",    # 25 customers, random
-        "RC106.50"    # 50 customers, mixed
-    ]
-    
-    all_experiments = {}
-    
-    for instance_name in instances:
-        result = run_experiment(
-            instance_name=instance_name,
-            population_size=population_size,
-            max_generations=max_generations,
-            n_runs=n_runs,
-            verbose=verbose
-        )
-        
-        if result:
-            all_experiments[instance_name] = result
-    
-    # Print summary table
-    print_results_table(all_experiments)
-    
-    return all_experiments
-
-
-def print_results_table(experiments: Dict):
-    """Print results in a formatted table similar to Table 5"""
-    print("\n" + "=" * 80)
-    print("RESULTS SUMMARY (K-NSGA-II)")
-    print("=" * 80)
-    
-    # Header
-    print(f"\n{'Instance':<12} | {'Pareto':<8} | {'Best F1':<15} | {'Best F2':<15} | {'Time(s)':<10}")
-    print("-" * 80)
-    
-    for instance, data in experiments.items():
-        metrics = data.get('avg_metrics', {})
-        if metrics:
-            pareto = f"{metrics['pareto_size']:.1f}"
-            f1 = f"{metrics['best_f1']:.2f} ± {metrics['best_f1_std']:.2f}"
-            f2 = f"{metrics['best_f2']:.2f} ± {metrics['best_f2_std']:.2f}"
-            time_s = f"{metrics['avg_time']:.2f}"
-            print(f"{instance:<12} | {pareto:<8} | {f1:<15} | {f2:<15} | {time_s:<10}")
-    
-    print("-" * 80)
-
-
-def quick_test():
-    """Quick test with small instance and few generations"""
-    print("\n" + "=" * 60)
-    print("QUICK TEST MODE")
-    print("=" * 60)
-    
-    instance_name = "C101.25"
-    
-    result = run_experiment(
-        instance_name=instance_name,
-        population_size=30,
-        max_generations=50,
-        n_runs=1,
-        verbose=True
+def run_experiment(instances: list, params: dict, num_runs: int = 30):
+    """Run full experimental study with statistical analysis"""
+    runner = ExperimentRunner(
+        instances=instances,
+        params=params,
+        num_runs=num_runs
     )
     
-    if result and result['avg_metrics']:
-        print("\nQuick Test Results:")
-        for key, value in result['avg_metrics'].items():
-            if isinstance(value, float):
-                print(f"  {key}: {value:.4f}")
-            else:
-                print(f"  {key}: {value}")
+    results = runner.run()
+    runner.generate_report()
+    
+    return results
 
 
 def main():
-    """Main entry point with command-line arguments"""
     parser = argparse.ArgumentParser(
-        description="K-NSGA-II for Home Health Care Routing and Scheduling"
+        description='K-NSGA-II for HHC-MOVRPTW',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py --instance C101.25              # Run single instance
+  python main.py --instance C101.25 --runs 30    # Run with 30 repetitions
+  python main.py --experiment                    # Run full Paper Table 5 experiment
+  python main.py --list                          # List available instances
+        """
     )
     
-    parser.add_argument('--instance', '-i', type=str, default=None,
-                        help='Instance name (e.g., C101.25)')
-    parser.add_argument('--population', '-p', type=int, default=100,
-                        help='Population size')
-    parser.add_argument('--generations', '-g', type=int, default=1000,
-                        help='Maximum generations')
-    parser.add_argument('--runs', '-r', type=int, default=1,
-                        help='Number of runs')
-    parser.add_argument('--table5', action='store_true',
-                        help='Run Table 5 replication experiment')
-    parser.add_argument('--test', action='store_true',
-                        help='Run quick test')
-    parser.add_argument('--verbose', '-v', action='store_true',
-                        help='Verbose output')
+    parser.add_argument('--instance', type=str, help='Instance name (e.g., C101.25)')
+    parser.add_argument('--runs', type=int, default=1, help='Number of runs (default: 1)')
+    parser.add_argument('--population', type=int, default=100, help='Population size')
+    parser.add_argument('--generations', type=int, default=1000, help='Max generations')
+    parser.add_argument('--experiment', action='store_true', help='Run full experiment')
+    parser.add_argument('--list', action='store_true', help='List available instances')
+    parser.add_argument('--output', type=str, default='results', help='Output directory')
+    parser.add_argument('--seed', type=int, default=None, help='Random seed')
+    parser.add_argument('--quiet', action='store_true', help='Minimal output')
     
     args = parser.parse_args()
     
-    if args.test:
-        quick_test()
-    elif args.table5:
-        run_table5_experiments(
-            population_size=args.population,
-            max_generations=args.generations,
-            n_runs=args.runs,
-            verbose=args.verbose
-        )
-    elif args.instance:
-        run_experiment(
-            instance_name=args.instance,
-            population_size=args.population,
-            max_generations=args.generations,
-            n_runs=args.runs,
-            verbose=True
-        )
-    else:
-        # Default: run quick test
-        print("No arguments provided. Running quick test...")
-        print("Use --help for command-line options")
-        quick_test()
+    # List instances
+    if args.list:
+        print("\nAvailable Instances:")
+        print("-" * 40)
+        for inst in list_available_instances():
+            print(f"  {inst}")
+        return
+    
+    # Parameters
+    params = {
+        'population_size': args.population,
+        'max_generations': args.generations,
+        'crossover_rate': 0.9,
+        'mutation_rate': 0.1,
+        'random_state': args.seed
+    }
+    
+    # Full experiment mode
+    if args.experiment:
+        print("\n" + "=" * 70)
+        print("K-NSGA-II EXPERIMENTAL STUDY")
+        print("Paper Table 5 Benchmark Instances")
+        print("=" * 70)
+        
+        instances = ['C101.25', 'C107.25', 'C206.25', 'R109.25', 'RC106.25']
+        run_experiment(instances, params, num_runs=args.runs if args.runs > 1 else 30)
+        return
+    
+    # Single instance mode
+    if args.instance:
+        if args.runs > 1:
+            # Multiple runs with statistics
+            all_results = []
+            for run in range(args.runs):
+                params['random_state'] = args.seed + run if args.seed else run
+                result = run_single_instance(
+                    args.instance, 
+                    params, 
+                    verbose=not args.quiet and run == 0
+                )
+                all_results.append(result)
+                if not args.quiet:
+                    print(f"Run {run+1}/{args.runs}: Hv={result['metrics']['hypervolume']:.4f}")
+            
+            # Calculate statistics
+            hvs = [r['metrics']['hypervolume'] for r in all_results]
+            sps = [r['metrics']['spacing'] for r in all_results]
+            
+            print(f"\n{'='*70}")
+            print(f"STATISTICAL RESULTS ({args.runs} runs)")
+            print(f"{'='*70}")
+            print(f"Hypervolume: {sum(hvs)/len(hvs):.4f} ± {(max(hvs)-min(hvs))/2:.4f}")
+            print(f"Spacing:     {sum(sps)/len(sps):.4f} ± {(max(sps)-min(sps))/2:.4f}")
+        else:
+            run_single_instance(args.instance, params, verbose=not args.quiet)
+        return
+    
+    # Interactive mode
+    print("\n" + "=" * 70)
+    print("K-NSGA-II: Home Health Care Multi-Objective VRP with Time Windows")
+    print("=" * 70)
+    print("\nUsage: python main.py --help for options")
+    print("\nQuick Start:")
+    print("  python main.py --instance C101.25")
+    print("  python main.py --experiment")
 
 
 if __name__ == "__main__":

@@ -1,66 +1,50 @@
 """
-NSGA-II (Non-dominated Sorting Genetic Algorithm II) Implementation
-For solving the HHC-MOVRPTW bi-objective optimization problem
+NSGA-II (Non-dominated Sorting Genetic Algorithm II)
+Implementation for HHC-MOVRPTW optimization
+
+Based on: Deb, K., et al. "A fast and elitist multiobjective genetic algorithm: NSGA-II"
 """
 
-import numpy as np
 import random
-from typing import List, Tuple, Optional
-from dataclasses import dataclass, field
-from copy import deepcopy
-
-from src.data_parser import ProblemInstance
-from src.problem import HHCProblem, Solution, Route
+import math
+from typing import List, Tuple, Optional, Dict
+from .problem import HHCInstance, Customer, Solution
 
 
-@dataclass
-class Individual:
+class NSGA2:
     """
-    Represents an individual (chromosome) in the NSGA-II population.
-    The chromosome is represented as a permutation of customer IDs.
-    """
-    chromosome: List[int]  # Permutation of customer IDs
-    objectives: Tuple[float, float] = None  # (F1, F2)
-    rank: int = 0  # Pareto front rank
-    crowding_distance: float = 0.0
+    NSGA-II Algorithm for Multi-Objective Optimization
+    Used in Stage 2 (Optimization) of K-NSGA-II
     
-    def __repr__(self):
-        if self.objectives:
-            return f"Individual(F1={self.objectives[0]:.2f}, F2={self.objectives[1]:.2f}, rank={self.rank})"
-        return f"Individual(chromosome_len={len(self.chromosome)})"
-
-
-class NSGAII:
-    """
-    NSGA-II Algorithm for Multi-Objective Optimization.
-    
-    Based on: Deb et al., "A Fast and Elitist Multiobjective Genetic Algorithm: NSGA-II"
-    
-    Key Features:
-    - Fast non-dominated sorting O(MN²)
-    - Crowding distance for diversity preservation
-    - Elitist selection strategy
+    Optimizes:
+        F1: Total service time (minimize)
+        F2: Total tardiness (minimize)
     """
     
-    def __init__(self,
-                 problem: HHCProblem,
-                 population_size: int = 100,
-                 max_generations: int = 1000,
-                 crossover_rate: float = 0.7,
-                 mutation_rate: float = 0.2,
-                 random_state: int = None):
+    def __init__(
+        self,
+        instance: HHCInstance,
+        customers: Optional[List[Customer]] = None,
+        population_size: int = 100,
+        max_generations: int = 1000,
+        crossover_rate: float = 0.9,
+        mutation_rate: float = 0.1,
+        random_state: Optional[int] = None
+    ):
         """
-        Initialize NSGA-II algorithm.
+        Initialize NSGA-II
         
         Args:
-            problem: HHC problem instance
-            population_size: Size of population (N)
-            max_generations: Maximum number of generations
+            instance: HHC problem instance
+            customers: Subset of customers for this cluster (None = all)
+            population_size: Size of population
+            max_generations: Number of generations
             crossover_rate: Probability of crossover
             mutation_rate: Probability of mutation
             random_state: Random seed for reproducibility
         """
-        self.problem = problem
+        self.instance = instance
+        self.customers = customers if customers else instance.customers
         self.population_size = population_size
         self.max_generations = max_generations
         self.crossover_rate = crossover_rate
@@ -68,560 +52,356 @@ class NSGAII:
         
         if random_state is not None:
             random.seed(random_state)
-            np.random.seed(random_state)
         
-        self.population: List[Individual] = []
-        self.pareto_front: List[Individual] = []
-        self.generation_history = []
-        
-        # Customer IDs to include (1-indexed)
-        # By default, all customers
-        self.customer_ids = list(range(1, problem.num_customers + 1))
+        self.population: List[Solution] = []
+        self.pareto_front: List[Solution] = []
     
-    def set_customer_subset(self, customer_ids: List[int]):
-        """Set a subset of customers for optimization (used in K-NSGA-II)"""
-        self.customer_ids = customer_ids
+    def _create_random_solution(self) -> Solution:
+        """Create a random solution (chromosome)"""
+        solution = Solution(self.instance)
+        
+        # Get customer IDs to route
+        customer_ids = [c.id for c in self.customers]
+        random.shuffle(customer_ids)
+        
+        # Simple: single route with all customers
+        # This represents a permutation-based encoding
+        solution.routes = [customer_ids]
+        solution.evaluate()
+        
+        return solution
     
-    def _create_random_individual(self) -> Individual:
-        """Create a random individual (permutation of customer IDs)"""
-        chromosome = self.customer_ids.copy()
-        random.shuffle(chromosome)
-        return Individual(chromosome=chromosome)
-    
-    def _create_nearest_neighbor_individual(self, start_idx: int = None) -> Individual:
-        """Create individual using nearest neighbor heuristic (for service time)"""
-        customers = self.customer_ids.copy()
-        if not customers:
-            return Individual(chromosome=[])
+    def _create_nearest_neighbor_solution(self) -> Solution:
+        """Create a solution using nearest neighbor heuristic"""
+        solution = Solution(self.instance)
         
-        if start_idx is None:
-            start_idx = random.randint(0, len(customers) - 1)
-        start_idx = start_idx % len(customers)
+        unvisited = set(c.id for c in self.customers)
+        route = []
         
-        chromosome = [customers[start_idx]]
-        remaining = customers.copy()
-        remaining.remove(customers[start_idx])
+        if not unvisited:
+            solution.routes = [route]
+            solution.evaluate()
+            return solution
         
-        while remaining:
-            last = chromosome[-1]
-            # Customer IDs are 1-indexed, list is 0-indexed
-            last_customer = self.problem.instance.customers[last - 1]
-            
+        # Start from customer nearest to depot
+        depot = self.instance.depot
+        current = min(self.customers, key=lambda c: 
+                     math.sqrt((c.x - depot.x)**2 + (c.y - depot.y)**2))
+        route.append(current.id)
+        unvisited.remove(current.id)
+        
+        # Build route using nearest neighbor
+        while unvisited:
             # Find nearest unvisited customer
-            best_dist = float('inf')
-            best_cust = remaining[0]
-            for cust_id in remaining:
-                cust = self.problem.instance.customers[cust_id - 1]
-                dist = ((last_customer.x - cust.x) ** 2 + (last_customer.y - cust.y) ** 2) ** 0.5
-                if dist < best_dist:
-                    best_dist = dist
-                    best_cust = cust_id
+            nearest = None
+            min_dist = float('inf')
             
-            chromosome.append(best_cust)
-            remaining.remove(best_cust)
-        
-        return Individual(chromosome=chromosome)
-    
-    def _create_earliest_deadline_individual(self) -> Individual:
-        """Create individual sorted by due date (for tardiness)"""
-        customers = self.customer_ids.copy()
-        customers.sort(key=lambda cid: self.problem.instance.customers[cid - 1].due_date)
-        return Individual(chromosome=customers)
-    
-    def _create_earliest_ready_individual(self) -> Individual:
-        """Create individual sorted by ready time"""
-        customers = self.customer_ids.copy()
-        customers.sort(key=lambda cid: self.problem.instance.customers[cid - 1].ready_time)
-        return Individual(chromosome=customers)
-    
-    def _decode_chromosome(self, chromosome: List[int]) -> Solution:
-        """
-        Decode chromosome to solution (routes).
-        Splits the permutation into routes for each caregiver.
-        """
-        n_customers = len(chromosome)
-        n_caregivers = self.problem.num_caregivers
-        
-        # For sub-problems (clusters), use single caregiver
-        if n_customers <= self.problem.max_patients_per_caregiver:
-            n_caregivers = 1
-        
-        # Calculate customers per route
-        customers_per_route = n_customers // n_caregivers
-        remainder = n_customers % n_caregivers
-        
-        routes = []
-        start_idx = 0
-        
-        for i in range(n_caregivers):
-            # Distribute remainder among first routes
-            route_size = customers_per_route + (1 if i < remainder else 0)
-            end_idx = start_idx + route_size
+            for cid in unvisited:
+                for c in self.customers:
+                    if c.id == cid:
+                        dist = math.sqrt((c.x - current.x)**2 + (c.y - current.y)**2)
+                        if dist < min_dist:
+                            min_dist = dist
+                            nearest = c
+                        break
             
-            if start_idx < n_customers:
-                route_customers = chromosome[start_idx:end_idx]
-                routes.append(Route(caregiver_id=i, customer_ids=route_customers))
-            
-            start_idx = end_idx
+            if nearest:
+                route.append(nearest.id)
+                unvisited.remove(nearest.id)
+                current = nearest
         
-        return Solution(routes=routes)
+        solution.routes = [route]
+        solution.evaluate()
+        return solution
     
-    def _evaluate_individual(self, individual: Individual) -> Tuple[float, float]:
-        """Evaluate an individual and return objective values"""
-        solution = self._decode_chromosome(individual.chromosome)
+    def _initialize_population(self) -> List[Solution]:
+        """Initialize population with random and heuristic solutions"""
+        population = []
         
-        # Always pass customer_ids for sub-problem evaluation
-        f1, f2, is_feasible = self.problem.evaluate_solution(solution, self.customer_ids)
+        # Add some heuristic solutions
+        for _ in range(min(5, self.population_size // 4)):
+            sol = self._create_nearest_neighbor_solution()
+            population.append(sol)
         
-        # Penalize infeasible solutions
-        if not is_feasible:
-            penalty = 1000000
-            f1 += penalty
-            f2 += penalty
+        # Fill rest with random solutions
+        while len(population) < self.population_size:
+            sol = self._create_random_solution()
+            population.append(sol)
         
-        individual.objectives = (f1, f2)
-        return f1, f2
+        return population
     
-    def _fast_non_dominated_sort(self, population: List[Individual]) -> List[List[Individual]]:
+    def _fast_non_dominated_sort(self, population: List[Solution]) -> List[List[Solution]]:
         """
-        Fast non-dominated sorting algorithm.
-        Returns list of fronts, where front[0] is the Pareto front.
-        
-        Complexity: O(MN²) where M is number of objectives, N is population size
+        Fast non-dominated sorting (NSGA-II)
+        Returns list of fronts, each front is a list of solutions
         """
         n = len(population)
+        S: Dict[int, List[int]] = {i: [] for i in range(n)}  # Solutions dominated by i
+        n_p: Dict[int, int] = {i: 0 for i in range(n)}        # Domination count for i
+        fronts: List[List[Solution]] = [[]]
+        rank: Dict[int, int] = {}
         
-        # S[p] = set of solutions dominated by p
-        # n[p] = number of solutions that dominate p
-        S = [[] for _ in range(n)]
-        n_dominated = [0] * n
-        
-        fronts = [[]]
-        
+        # Calculate domination for each pair
         for p in range(n):
             for q in range(n):
-                if p != q:
-                    if self._dominates(population[p], population[q]):
-                        S[p].append(q)
-                    elif self._dominates(population[q], population[p]):
-                        n_dominated[p] += 1
+                if p == q:
+                    continue
+                
+                if population[p].dominates(population[q]):
+                    S[p].append(q)
+                elif population[q].dominates(population[p]):
+                    n_p[p] += 1
             
-            if n_dominated[p] == 0:
+            if n_p[p] == 0:
+                rank[p] = 0
                 population[p].rank = 0
                 fronts[0].append(population[p])
         
+        # Build subsequent fronts
         i = 0
         while fronts[i]:
             next_front = []
-            for p_ind in fronts[i]:
-                p = population.index(p_ind)
-                for q in S[p]:
-                    n_dominated[q] -= 1
-                    if n_dominated[q] == 0:
-                        population[q].rank = i + 1
-                        next_front.append(population[q])
+            for p_idx, p in enumerate(population):
+                if p in fronts[i]:
+                    for q in S[p_idx]:
+                        n_p[q] -= 1
+                        if n_p[q] == 0:
+                            rank[q] = i + 1
+                            population[q].rank = i + 1
+                            next_front.append(population[q])
+            
             i += 1
-            fronts.append(next_front)
-        
-        # Remove empty last front
-        if not fronts[-1]:
-            fronts.pop()
+            if next_front:
+                fronts.append(next_front)
+            else:
+                break
         
         return fronts
     
-    def _dominates(self, ind1: Individual, ind2: Individual) -> bool:
-        """Check if ind1 dominates ind2 (for minimization)"""
-        if ind1.objectives is None or ind2.objectives is None:
-            return False
-        
-        f1_1, f2_1 = ind1.objectives
-        f1_2, f2_2 = ind2.objectives
-        
-        no_worse = (f1_1 <= f1_2) and (f2_1 <= f2_2)
-        strictly_better = (f1_1 < f1_2) or (f2_1 < f2_2)
-        
-        return no_worse and strictly_better
-    
-    def _calculate_crowding_distance(self, front: List[Individual]):
-        """
-        Calculate crowding distance for individuals in a front.
-        
-        Crowding distance measures how close an individual is to its neighbors.
-        Higher distance = more isolated = more preferred for diversity.
-        """
+    def _calculate_crowding_distance(self, front: List[Solution]) -> None:
+        """Calculate crowding distance for solutions in a front"""
         n = len(front)
         if n == 0:
             return
         
-        for ind in front:
-            ind.crowding_distance = 0.0
-        
-        if n <= 2:
-            for ind in front:
-                ind.crowding_distance = float('inf')
-            return
+        # Initialize distances
+        for sol in front:
+            sol.crowding_distance = 0.0
         
         # For each objective
-        for m in range(2):  # 2 objectives
-            # Sort by objective m
-            front.sort(key=lambda x: x.objectives[m])
+        for obj in ['f1', 'f2']:
+            # Sort by objective
+            front.sort(key=lambda x: getattr(x, obj))
             
-            # Boundary individuals get infinite distance
+            # Boundary solutions get infinite distance
             front[0].crowding_distance = float('inf')
             front[-1].crowding_distance = float('inf')
             
-            # Calculate distance for intermediate individuals
-            obj_range = front[-1].objectives[m] - front[0].objectives[m]
+            # Get objective range
+            obj_min = getattr(front[0], obj)
+            obj_max = getattr(front[-1], obj)
+            obj_range = obj_max - obj_min
+            
             if obj_range == 0:
                 continue
             
+            # Calculate crowding distance
             for i in range(1, n - 1):
                 front[i].crowding_distance += (
-                    (front[i + 1].objectives[m] - front[i - 1].objectives[m]) / obj_range
-                )
+                    getattr(front[i + 1], obj) - getattr(front[i - 1], obj)
+                ) / obj_range
     
-    def _crowded_comparison(self, ind1: Individual, ind2: Individual) -> Individual:
-        """
-        Crowded comparison operator.
-        Returns the better individual based on rank and crowding distance.
-        """
-        if ind1.rank < ind2.rank:
-            return ind1
-        elif ind2.rank < ind1.rank:
-            return ind2
-        elif ind1.crowding_distance > ind2.crowding_distance:
-            return ind1
+    def _tournament_selection(self, population: List[Solution]) -> Solution:
+        """Binary tournament selection"""
+        i1 = random.randint(0, len(population) - 1)
+        i2 = random.randint(0, len(population) - 1)
+        
+        p1 = population[i1]
+        p2 = population[i2]
+        
+        # Select based on rank and crowding distance
+        if p1.rank < p2.rank:
+            return p1
+        elif p2.rank < p1.rank:
+            return p2
+        elif p1.crowding_distance > p2.crowding_distance:
+            return p1
         else:
-            return ind2
+            return p2
     
-    def _tournament_selection(self, population: List[Individual], k: int = 2) -> Individual:
-        """Binary tournament selection using crowded comparison"""
-        candidates = random.sample(population, k)
-        winner = candidates[0]
-        for candidate in candidates[1:]:
-            winner = self._crowded_comparison(winner, candidate)
-        return winner
-    
-    def _order_crossover(self, parent1: Individual, parent2: Individual) -> Tuple[Individual, Individual]:
-        """
-        Order Crossover (OX) for permutation representation.
-        Preserves relative order of elements.
-        """
-        size = len(parent1.chromosome)
+    def _crossover(self, parent1: Solution, parent2: Solution) -> Tuple[Solution, Solution]:
+        """Order crossover (OX) for permutation representation"""
+        if random.random() > self.crossover_rate:
+            return parent1.copy(), parent2.copy()
+        
+        route1 = parent1.routes[0] if parent1.routes else []
+        route2 = parent2.routes[0] if parent2.routes else []
+        
+        if len(route1) < 2 or len(route2) < 2:
+            return parent1.copy(), parent2.copy()
+        
+        size = len(route1)
         
         # Select crossover points
-        point1, point2 = sorted(random.sample(range(size), 2))
+        point1 = random.randint(0, size - 1)
+        point2 = random.randint(0, size - 1)
+        if point1 > point2:
+            point1, point2 = point2, point1
         
         # Create offspring
-        def create_child(p1, p2):
-            child = [None] * size
-            
-            # Copy segment from p1
-            child[point1:point2] = p1.chromosome[point1:point2]
-            
-            # Fill remaining from p2 in order
-            p2_elements = [x for x in p2.chromosome if x not in child]
-            
-            idx = 0
-            for i in range(size):
-                if child[i] is None:
-                    child[i] = p2_elements[idx]
-                    idx += 1
-            
-            return Individual(chromosome=child)
+        child1 = Solution(self.instance)
+        child2 = Solution(self.instance)
         
-        child1 = create_child(parent1, parent2)
-        child2 = create_child(parent2, parent1)
+        # Initialize with -1
+        offspring1 = [-1] * size
+        offspring2 = [-1] * size
+        
+        # Copy segment from parents
+        for i in range(point1, point2 + 1):
+            offspring1[i] = route1[i]
+            offspring2[i] = route2[i]
+        
+        # Fill remaining positions
+        def fill_remaining(offspring, other_parent, p1, p2):
+            current_pos = (p2 + 1) % size
+            parent_pos = (p2 + 1) % size
+            
+            while -1 in offspring:
+                gene = other_parent[parent_pos]
+                if gene not in offspring:
+                    offspring[current_pos] = gene
+                    current_pos = (current_pos + 1) % size
+                parent_pos = (parent_pos + 1) % size
+        
+        fill_remaining(offspring1, route2, point1, point2)
+        fill_remaining(offspring2, route1, point1, point2)
+        
+        child1.routes = [offspring1]
+        child2.routes = [offspring2]
+        
+        child1.evaluate()
+        child2.evaluate()
         
         return child1, child2
     
-    def _swap_mutation(self, individual: Individual) -> Individual:
-        """Swap mutation: swap two random positions"""
-        chromosome = individual.chromosome.copy()
+    def _mutate(self, solution: Solution) -> Solution:
+        """Swap mutation for permutation representation"""
+        if random.random() > self.mutation_rate:
+            return solution
         
-        if len(chromosome) > 1:
-            i, j = random.sample(range(len(chromosome)), 2)
-            chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
+        mutated = solution.copy()
         
-        return Individual(chromosome=chromosome)
+        if not mutated.routes or not mutated.routes[0]:
+            return mutated
+        
+        route = mutated.routes[0]
+        if len(route) < 2:
+            return mutated
+        
+        # Swap two random positions
+        i = random.randint(0, len(route) - 1)
+        j = random.randint(0, len(route) - 1)
+        route[i], route[j] = route[j], route[i]
+        
+        mutated.routes = [route]
+        mutated.evaluate()
+        
+        return mutated
     
-    def _inversion_mutation(self, individual: Individual) -> Individual:
-        """Inversion mutation: reverse a random segment"""
-        chromosome = individual.chromosome.copy()
-        
-        if len(chromosome) > 2:
-            i, j = sorted(random.sample(range(len(chromosome)), 2))
-            chromosome[i:j+1] = chromosome[i:j+1][::-1]
-        
-        return Individual(chromosome=chromosome)
-    
-    def _insertion_mutation(self, individual: Individual) -> Individual:
-        """Insertion mutation: remove element and insert at random position"""
-        chromosome = individual.chromosome.copy()
-        
-        if len(chromosome) > 2:
-            # Remove random element
-            i = random.randint(0, len(chromosome) - 1)
-            element = chromosome.pop(i)
-            # Insert at random position
-            j = random.randint(0, len(chromosome))
-            chromosome.insert(j, element)
-        
-        return Individual(chromosome=chromosome)
-    
-    def _or_opt_mutation(self, individual: Individual) -> Individual:
-        """Or-opt: move a sequence of 1-3 customers to another position"""
-        chromosome = individual.chromosome.copy()
-        n = len(chromosome)
-        
-        if n > 3:
-            # Length of segment to move (1, 2, or 3)
-            seg_len = random.randint(1, min(3, n - 1))
-            # Starting position of segment
-            start = random.randint(0, n - seg_len)
-            # Extract segment
-            segment = chromosome[start:start + seg_len]
-            # Remove segment
-            remaining = chromosome[:start] + chromosome[start + seg_len:]
-            # Insert at random position
-            insert_pos = random.randint(0, len(remaining))
-            chromosome = remaining[:insert_pos] + segment + remaining[insert_pos:]
-        
-        return Individual(chromosome=chromosome)
-    
-    def _2opt_local_search(self, individual: Individual) -> Individual:
-        """Apply 2-opt local search to improve a solution (lightweight version)"""
-        chromosome = individual.chromosome.copy()
-        n = len(chromosome)
-        
-        if n <= 3:
-            return individual
-        
-        # Evaluate current solution
-        test_ind = Individual(chromosome=chromosome)
-        self._evaluate_individual(test_ind)
-        best_obj = test_ind.objectives[0] + test_ind.objectives[1]  # Sum objectives
-        
-        # Limited 2-opt: try only a few random swaps
-        for _ in range(min(10, n)):
-            i = random.randint(0, n - 3)
-            j = random.randint(i + 2, n - 1)
-            
-            # Try 2-opt swap (reverse segment between i+1 and j)
-            new_chromosome = chromosome[:i+1] + chromosome[i+1:j+1][::-1] + chromosome[j+1:]
-            test_ind = Individual(chromosome=new_chromosome)
-            self._evaluate_individual(test_ind)
-            new_obj = test_ind.objectives[0] + test_ind.objectives[1]
-            
-            if new_obj < best_obj:
-                chromosome = new_chromosome
-                best_obj = new_obj
-        
-        return Individual(chromosome=chromosome)
-    
-    def _create_offspring(self, population: List[Individual]) -> List[Individual]:
-        """Create offspring population using genetic operators"""
+    def _create_offspring(self, population: List[Solution]) -> List[Solution]:
+        """Create offspring population through selection, crossover, mutation"""
         offspring = []
         
         while len(offspring) < self.population_size:
-            # Selection
+            # Select parents
             parent1 = self._tournament_selection(population)
             parent2 = self._tournament_selection(population)
             
             # Crossover
-            if random.random() < self.crossover_rate:
-                child1, child2 = self._order_crossover(parent1, parent2)
-            else:
-                child1 = Individual(chromosome=parent1.chromosome.copy())
-                child2 = Individual(chromosome=parent2.chromosome.copy())
+            child1, child2 = self._crossover(parent1, parent2)
             
-            # Mutation - use multiple operators with different probabilities
-            if random.random() < self.mutation_rate:
-                mutation_type = random.random()
-                if mutation_type < 0.3:
-                    child1 = self._swap_mutation(child1)
-                elif mutation_type < 0.6:
-                    child1 = self._inversion_mutation(child1)
-                elif mutation_type < 0.8:
-                    child1 = self._insertion_mutation(child1)
-                else:
-                    child1 = self._or_opt_mutation(child1)
+            # Mutation
+            child1 = self._mutate(child1)
+            child2 = self._mutate(child2)
             
-            if random.random() < self.mutation_rate:
-                mutation_type = random.random()
-                if mutation_type < 0.3:
-                    child2 = self._swap_mutation(child2)
-                elif mutation_type < 0.6:
-                    child2 = self._inversion_mutation(child2)
-                elif mutation_type < 0.8:
-                    child2 = self._insertion_mutation(child2)
-                else:
-                    child2 = self._or_opt_mutation(child2)
-            
-            # Apply local search with very small probability
-            if random.random() < 0.02:  # 2% chance
-                child1 = self._2opt_local_search(child1)
-            
-            offspring.append(child1)
-            if len(offspring) < self.population_size:
-                offspring.append(child2)
+            offspring.extend([child1, child2])
         
-        return offspring
+        return offspring[:self.population_size]
     
-    def _initialize_population(self):
-        """Initialize population with a mix of heuristic and random individuals"""
-        self.population = []
+    def _select_next_generation(self, combined: List[Solution]) -> List[Solution]:
+        """Select next generation from combined parent+offspring population"""
+        # Non-dominated sorting
+        fronts = self._fast_non_dominated_sort(combined)
         
-        # Seed with heuristic individuals for better initial coverage
-        # 10% nearest neighbor from different starts
-        n_nn = max(1, self.population_size // 10)
-        for i in range(n_nn):
-            individual = self._create_nearest_neighbor_individual(start_idx=i)
-            self._evaluate_individual(individual)
-            self.population.append(individual)
+        # Calculate crowding distance for each front
+        for front in fronts:
+            self._calculate_crowding_distance(front)
         
-        # Add deadline-sorted individual
-        ind_deadline = self._create_earliest_deadline_individual()
-        self._evaluate_individual(ind_deadline)
-        self.population.append(ind_deadline)
+        # Select solutions for next generation
+        next_gen = []
+        front_idx = 0
         
-        # Add ready-time-sorted individual
-        ind_ready = self._create_earliest_ready_individual()
-        self._evaluate_individual(ind_ready)
-        self.population.append(ind_ready)
+        while len(next_gen) + len(fronts[front_idx]) <= self.population_size:
+            next_gen.extend(fronts[front_idx])
+            front_idx += 1
+            if front_idx >= len(fronts):
+                break
         
-        # Fill rest with random individuals
-        while len(self.population) < self.population_size:
-            individual = self._create_random_individual()
-            self._evaluate_individual(individual)
-            self.population.append(individual)
+        # If we need more solutions, select from next front by crowding distance
+        if len(next_gen) < self.population_size and front_idx < len(fronts):
+            remaining = self.population_size - len(next_gen)
+            fronts[front_idx].sort(key=lambda x: x.crowding_distance, reverse=True)
+            next_gen.extend(fronts[front_idx][:remaining])
+        
+        return next_gen
     
-    def run(self, verbose: bool = True) -> List[Individual]:
+    def run(self, verbose: bool = False) -> List[Solution]:
         """
-        Run NSGA-II algorithm.
+        Run NSGA-II optimization
+        
+        Args:
+            verbose: Print progress information
         
         Returns:
-            List of non-dominated individuals (Pareto front)
+            Pareto front (list of non-dominated solutions)
         """
-        if verbose:
-            print(f"\nRunning NSGA-II")
-            print(f"  Population size: {self.population_size}")
-            print(f"  Max generations: {self.max_generations}")
-            print(f"  Customers: {len(self.customer_ids)}")
-        
         # Initialize population
-        self._initialize_population()
+        self.population = self._initialize_population()
         
-        # Initial non-dominated sort
+        # Initial sorting
         fronts = self._fast_non_dominated_sort(self.population)
         for front in fronts:
             self._calculate_crowding_distance(front)
         
         # Main loop
-        for generation in range(self.max_generations):
+        for gen in range(self.max_generations):
             # Create offspring
             offspring = self._create_offspring(self.population)
-            
-            # Evaluate offspring
-            for ind in offspring:
-                self._evaluate_individual(ind)
             
             # Combine parent and offspring
             combined = self.population + offspring
             
-            # Non-dominated sorting
-            fronts = self._fast_non_dominated_sort(combined)
-            
             # Select next generation
-            new_population = []
-            front_idx = 0
-            
-            while len(new_population) + len(fronts[front_idx]) <= self.population_size:
-                # Add entire front
-                self._calculate_crowding_distance(fronts[front_idx])
-                new_population.extend(fronts[front_idx])
-                front_idx += 1
-                
-                if front_idx >= len(fronts):
-                    break
-            
-            # Fill remaining slots using crowding distance
-            if len(new_population) < self.population_size and front_idx < len(fronts):
-                self._calculate_crowding_distance(fronts[front_idx])
-                fronts[front_idx].sort(key=lambda x: x.crowding_distance, reverse=True)
-                
-                remaining = self.population_size - len(new_population)
-                new_population.extend(fronts[front_idx][:remaining])
-            
-            self.population = new_population
-            
-            # Track progress
-            self.pareto_front = fronts[0] if fronts else []
-            
-            if verbose and (generation + 1) % 100 == 0:
-                best_f1 = min(ind.objectives[0] for ind in self.pareto_front)
-                best_f2 = min(ind.objectives[1] for ind in self.pareto_front)
-                print(f"  Generation {generation + 1}: PF size={len(self.pareto_front)}, "
-                      f"Best F1={best_f1:.2f}, Best F2={best_f2:.2f}")
-            
-            self.generation_history.append({
-                'generation': generation + 1,
-                'pareto_size': len(self.pareto_front),
-                'best_f1': min(ind.objectives[0] for ind in self.pareto_front),
-                'best_f2': min(ind.objectives[1] for ind in self.pareto_front)
-            })
+            self.population = self._select_next_generation(combined)
         
-        # Final non-dominated sort
+        # Extract final Pareto front
         fronts = self._fast_non_dominated_sort(self.population)
         self.pareto_front = fronts[0] if fronts else []
         
-        if verbose:
-            print(f"\nFinal Pareto front size: {len(self.pareto_front)}")
-        
         return self.pareto_front
     
-    def get_pareto_solutions(self) -> List[Tuple[float, float]]:
-        """Get objective values of Pareto front solutions"""
-        return [ind.objectives for ind in self.pareto_front]
+    def get_pareto_front(self) -> List[Solution]:
+        """Return the Pareto front"""
+        return self.pareto_front
     
-    def get_best_solution(self, objective: int = 0) -> Individual:
-        """Get the best solution for a specific objective (0=F1, 1=F2)"""
+    def get_best_f1(self) -> Optional[Solution]:
+        """Get solution with best F1 value"""
         if not self.pareto_front:
             return None
-        return min(self.pareto_front, key=lambda x: x.objectives[objective])
-
-
-if __name__ == "__main__":
-    # Test NSGA-II
-    from src.data_parser import load_instance
+        return min(self.pareto_front, key=lambda x: x.f1)
     
-    print("Testing NSGA-II Algorithm")
-    print("=" * 50)
-    
-    # Load test instance
-    instance = load_instance("C101.25")
-    problem = HHCProblem(instance)
-    
-    print(f"\nInstance: {instance.name}")
-    print(f"Customers: {problem.num_customers}")
-    print(f"Caregivers: {problem.num_caregivers}")
-    
-    # Run NSGA-II with smaller parameters for testing
-    nsga2 = NSGAII(
-        problem=problem,
-        population_size=50,
-        max_generations=100,
-        crossover_rate=0.7,
-        mutation_rate=0.2,
-        random_state=42
-    )
-    
-    pareto_front = nsga2.run(verbose=True)
-    
-    # Print Pareto front
-    print("\nPareto Front Solutions:")
-    for i, ind in enumerate(pareto_front[:10]):  # Show first 10
-        print(f"  {i+1}. F1={ind.objectives[0]:.2f}, F2={ind.objectives[1]:.2f}")
-    
-    if len(pareto_front) > 10:
-        print(f"  ... ({len(pareto_front) - 10} more solutions)")
+    def get_best_f2(self) -> Optional[Solution]:
+        """Get solution with best F2 value"""
+        if not self.pareto_front:
+            return None
+        return min(self.pareto_front, key=lambda x: x.f2)
