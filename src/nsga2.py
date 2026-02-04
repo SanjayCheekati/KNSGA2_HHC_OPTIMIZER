@@ -1,8 +1,14 @@
 """
 NSGA-II (Non-dominated Sorting Genetic Algorithm II)
+======================================================
 Implementation for HHC-MOVRPTW optimization
 
-Based on: Deb, K., et al. "A fast and elitist multiobjective genetic algorithm: NSGA-II"
+A fast and elitist multi-objective genetic algorithm featuring:
+- Fast non-dominated sorting with O(MN^2) complexity
+- Crowding distance for diversity preservation
+- Elitist selection mechanism
+
+This is used as the core optimizer in Stage 2 of K-NSGA-II.
 """
 
 import random
@@ -14,7 +20,12 @@ from .problem import HHCInstance, Customer, Solution
 class NSGA2:
     """
     NSGA-II Algorithm for Multi-Objective Optimization
-    Used in Stage 2 (Optimization) of K-NSGA-II
+    
+    A population-based evolutionary algorithm that maintains a diverse
+    set of Pareto-optimal solutions through:
+    - Non-dominated sorting (rank-based selection)
+    - Crowding distance (diversity preservation)
+    - Elitism (preserving best solutions)
     
     Optimizes:
         F1: Total service time (minimize)

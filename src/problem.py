@@ -97,6 +97,10 @@ class Solution:
         
         F1 (Service Time): Sum of all travel times + service times
         F2 (Tardiness): Sum of max(0, arrival_time - due_date) for all customers
+        
+        Constraints enforced:
+        - Vehicle capacity constraint (demand vs capacity)
+        - Time window constraints (soft - penalized via tardiness)
         """
         total_service_time = 0.0
         total_tardiness = 0.0
@@ -110,6 +114,7 @@ class Solution:
             # Start from depot
             current_time = 0.0
             prev_node = depot
+            route_demand = 0.0
             
             for cust_id in route:
                 # Find customer
@@ -122,6 +127,9 @@ class Solution:
                 if customer is None:
                     continue
                 
+                # Accumulate demand for capacity check
+                route_demand += customer.demand
+                
                 # Travel time from previous node
                 travel_time = self.instance.get_travel_time(prev_node, customer)
                 total_service_time += travel_time
@@ -129,10 +137,10 @@ class Solution:
                 # Arrival time at customer
                 arrival_time = current_time + travel_time
                 
-                # Wait if arriving before ready time
+                # Wait if arriving before ready time (earliest start)
                 start_service = max(arrival_time, customer.ready_time)
                 
-                # Calculate tardiness
+                # Calculate tardiness (late arrival penalty)
                 tardiness = max(0, arrival_time - customer.due_date)
                 total_tardiness += tardiness
                 
@@ -146,11 +154,31 @@ class Solution:
             if route:
                 travel_time = self.instance.get_travel_time(prev_node, depot)
                 total_service_time += travel_time
+            
+            # Capacity constraint violation penalty
+            if route_demand > self.instance.vehicle_capacity:
+                capacity_violation = route_demand - self.instance.vehicle_capacity
+                # Add penalty to both objectives
+                total_service_time += capacity_violation * 100
+                total_tardiness += capacity_violation * 100
         
         self.f1 = total_service_time
         self.f2 = total_tardiness
         
         return self.f1, self.f2
+    
+    def is_feasible(self) -> bool:
+        """Check if solution satisfies all hard constraints"""
+        for route in self.routes:
+            route_demand = 0.0
+            for cust_id in route:
+                for c in self.instance.customers:
+                    if c.id == cust_id:
+                        route_demand += c.demand
+                        break
+            if route_demand > self.instance.vehicle_capacity:
+                return False
+        return True
     
     def dominates(self, other: 'Solution') -> bool:
         """Check if this solution dominates another (for minimization)"""

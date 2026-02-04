@@ -1,16 +1,17 @@
-# K-NSGA-II Requirements
-# Core dependencies - no external packages required for basic functionality
+# K-NSGA-II Dependencies
+# =======================
+# Core algorithm runs with pure Python (no external dependencies required)
 
-# Optional: For advanced visualization
-# matplotlib>=3.5.0
-# numpy>=1.21.0
+# Recommended: For visualization and statistics
+numpy>=1.21.0
+matplotlib>=3.5.0
+scipy>=1.7.0
+
+# Optional: For enhanced visualization
 # seaborn>=0.11.0
 
 # Optional: For parallel execution
 # joblib>=1.1.0
-
-# Optional: For advanced statistics
-# scipy>=1.7.0
 
 # Development dependencies
 # pytest>=7.0.0
