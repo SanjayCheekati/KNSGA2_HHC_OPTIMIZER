@@ -1,0 +1,4 @@
+# K-NSGA-II for HHC-MOVRPTW
+# Dependencies
+
+numpy>=1.20.0
