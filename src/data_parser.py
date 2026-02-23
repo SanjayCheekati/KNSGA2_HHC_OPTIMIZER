@@ -6,7 +6,58 @@ Parses Solomon VRPTW format files for HHC-MOVRPTW
 import os
 from typing import Optional
 from .problem import Customer, HHCInstance
+# Experimentally optimized number of clusters (K) for each benchmark instance.
+# K includes a depot cluster during fitting, but since our K-means operates
+# on customers only (no depot), we store the effective K-1 value here.
+OPTIMAL_K_VALUES = {
+    'C101.25': 2,
+    'C101.50': 3,
+    'C101.100': 4,
+    'C107.25': 2,
+    'C107.50': 3,
+    'C107.100': 4,
+    'C206.25': 2,
+    'C206.50': 3,
+    'R109.25': 2,
+    'R109.50': 3,
+    'RC106.25': 2,
+    'RC106.50': 3,
+}
 
+# In Home Health Care, service time is standardized to 20 minutes per visit.
+HHC_SERVICE_TIME = 20.0
+
+
+def get_num_clusters(instance_name: str, num_customers: int) -> int:
+    """
+    Get the optimal number of clusters (caregivers) for a given instance.
+    Uses tuned values when available, otherwise applies a size-based heuristic.
+    
+    Args:
+        instance_name: Instance name (e.g., 'C101.25')
+        num_customers: Number of customers in the instance
+    
+    Returns:
+        Number of clusters for K-means (customer-only, excluding depot)
+    """
+    name_upper = instance_name.upper()
+    if name_upper in OPTIMAL_K_VALUES:
+        return OPTIMAL_K_VALUES[name_upper]
+    
+    # Also try constructing key as "NAME.SIZE" (instance.name from file is just "C101")
+    composite_key = f"{name_upper}.{num_customers}"
+    if composite_key in OPTIMAL_K_VALUES:
+        return OPTIMAL_K_VALUES[composite_key]
+    
+    # Heuristic for unknown instances: ~10-13 customers per cluster
+    if num_customers <= 30:
+        return 2
+    elif num_customers <= 60:
+        return 3
+    elif num_customers <= 120:
+        return 4
+    else:
+        return max(2, num_customers // 25)
 
 def parse_solomon_file(filepath: str) -> HHCInstance:
     """
@@ -87,6 +138,10 @@ def parse_solomon_file(filepath: str) -> HHCInstance:
     if depot is None:
         # Create default depot at origin
         depot = Customer(id=0, x=0, y=0, demand=0, ready_time=0, due_date=1000, service_time=0)
+    
+    # HHC standardized service time: 20 minutes per patient visit
+    for customer in customers:
+        customer.service_time = HHC_SERVICE_TIME
     
     return HHCInstance(
         name=name,

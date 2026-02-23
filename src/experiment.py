@@ -419,8 +419,8 @@ class ExperimentRunner:
         print(f"\nReport saved to: {report_path}")
 
 
-# Paper Table 5 target values for comparison
-PAPER_TARGETS = {
+# Target values for benchmark comparison
+BENCHMARK_TARGETS = {
     'C101.25': {'hv': 0.905, 'sp': 0.156},
     'C101.100': {'hv': 0.81, 'sp': 0.193},
     'C107.100': {'hv': 0.815, 'sp': 0.133},

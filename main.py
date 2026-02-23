@@ -21,6 +21,7 @@ Version: 2.1.0
 import sys
 import os
 import time
+import random
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,7 +30,7 @@ from src.data_parser import load_instance, list_available_instances
 from src.hybrid_knsga2 import KNSGAII
 
 # Benchmark instances for evaluation
-BENCHMARK_INSTANCES = ['C101.25', 'C101.100', 'C107.100', 'C206.50', 'RC106.50']
+BENCHMARK_INSTANCES = ['C101.25', 'C101.100', 'C107.100', 'C206.50', 'R109.25', 'RC106.50']
 
 # Algorithm parameter presets
 PARAM_PRESETS = {
@@ -128,60 +129,6 @@ def run_optimization(instance_name: str, population: int, generations: int,
     return results
 
 
-def interactive_menu():
-    """Interactive command-line interface for algorithm execution."""
-    
-    while True:
-        print("\n" + "=" * 70)
-        print("  K-NSGA-II: Multi-Objective Home Health Care Optimization")
-        print("=" * 70)
-        print("\n  Select Instance:")
-        print("  " + "-" * 50)
-        
-        for i, inst in enumerate(BENCHMARK_INSTANCES, 1):
-            # Parse instance info
-            parts = inst.split('.')
-            customers = parts[1] if len(parts) > 1 else '?'
-            print(f"    {i}. {inst:<15} ({customers} customers)")
-        
-        print(f"\n    6. Run ALL benchmark instances")
-        print(f"    7. Custom instance")
-        print(f"    0. Exit")
-        
-        print("  " + "-" * 50)
-        
-        try:
-            choice = input("\n  Enter choice (0-7): ").strip()
-            
-            if choice == '0':
-                print("\n  Thank you for using K-NSGA-II. Goodbye!\n")
-                break
-            
-            elif choice in ['1', '2', '3', '4', '5']:
-                selected_instance = BENCHMARK_INSTANCES[int(choice) - 1]
-                run_with_params(selected_instance)
-            
-            elif choice == '6':
-                run_benchmark_suite()
-            
-            elif choice == '7':
-                custom = input("  Enter instance name (e.g., C101.50): ").strip().upper()
-                try:
-                    run_with_params(custom)
-                except FileNotFoundError:
-                    print(f"\n  Error: Instance '{custom}' not found!")
-                    print(f"  Available: {', '.join(list_available_instances()[:10])}...")
-            
-            else:
-                print("  Invalid choice. Please enter 0-7.")
-                
-        except KeyboardInterrupt:
-            print("\n\n  Interrupted. Goodbye!\n")
-            break
-        except Exception as e:
-            print(f"  Error: {e}")
-
-
 def run_with_params(instance_name: str):
     """Select parameters and run optimization."""
     
@@ -212,56 +159,58 @@ def run_with_params(instance_name: str):
     run_optimization(instance_name, pop, gen, num_runs, verbose=True)
 
 
-def run_benchmark_suite():
-    """Execute optimization on all benchmark instances."""
+def interactive_menu():
+    """Interactive command-line interface for algorithm execution."""
     
-    print("\n  Parameter Presets for Benchmark Suite:")
-    print("    1. Fast     (pop=50,  gen=100)   - ~15 seconds total")
-    print("    2. Standard (pop=100, gen=500)   - ~3 minutes total")
-    
-    preset = input("\n  Choice (1-2) [default=1]: ").strip() or '1'
-    
-    if preset == '1':
-        pop, gen = 50, 100
-    else:
-        pop, gen = 100, 500
-    
-    runs_input = input("  Runs per instance [1]: ").strip() or '1'
-    num_runs = int(runs_input)
-    
-    print("\n" + "=" * 75)
-    print(f"  BENCHMARK SUITE: {len(BENCHMARK_INSTANCES)} instances")
-    print(f"  Configuration: population={pop}, generations={gen}, runs={num_runs}")
-    print("=" * 75)
-    
-    results = {}
-    total_start = time.time()
-    
-    for inst in BENCHMARK_INSTANCES:
-        result = run_optimization(inst, pop, gen, num_runs, verbose=True)
-        results[inst] = result
-    
-    # Print summary table
-    print("\n" + "=" * 75)
-    print("  BENCHMARK SUMMARY")
-    print("=" * 75)
-    print(f"  {'Instance':<12} {'Hypervolume':>12} {'Spacing':>10} {'Pareto':>8} {'Time':>10}")
-    print("  " + "-" * 60)
-    
-    for inst, r in results.items():
-        print(f"  {inst:<12} {r['avg_hv']:>12.4f} {r['avg_sp']:>10.4f} "
-              f"{r['avg_pareto_size']:>8.1f} {r['avg_time']:>9.2f}s")
-    
-    print("  " + "-" * 60)
-    avg_hv = sum(r['avg_hv'] for r in results.values()) / len(results)
-    total_time = time.time() - total_start
-    print(f"  {'AVERAGE':<12} {avg_hv:>12.4f}")
-    print(f"\n  Total execution time: {total_time:.1f}s")
-    print("=" * 75)
+    while True:
+        print("\n" + "=" * 70)
+        print("  K-NSGA-II: Multi-Objective Home Health Care Optimization")
+        print("=" * 70)
+        print("\n  Select Option:")
+        print("  " + "-" * 50)
+        
+        for i, inst in enumerate(BENCHMARK_INSTANCES, 1):
+            parts = inst.split('.')
+            customers = parts[1] if len(parts) > 1 else '?'
+            print(f"    {i}. {inst:<15} ({customers} customers)")
+        
+        n = len(BENCHMARK_INSTANCES)
+        # custom instance follows the last benchmark
+        print(f"\n    {n + 1}. Custom instance")
+        print(f"    0. Exit")
+        
+        print("  " + "-" * 50)
+        
+        try:
+            choice = input(f"\n  Enter choice (0-{n + 2}): ").strip()
+            
+            if choice == '0':
+                print("\n  Thank you for using K-NSGA-II. Goodbye!\n")
+                break
+            
+            elif choice.isdigit() and 1 <= int(choice) <= n:
+                selected_instance = BENCHMARK_INSTANCES[int(choice) - 1]
+                run_with_params(selected_instance)
+            
+            elif choice == str(n + 1):
+                custom = input("  Enter instance name (e.g., C101.50): ").strip().upper()
+                try:
+                    run_with_params(custom)
+                except FileNotFoundError:
+                    print(f"\n  Error: Instance '{custom}' not found!")
+                    print(f"  Available: {', '.join(list_available_instances()[:10])}...")
+            
+            else:
+                print(f"  Invalid choice. Please enter 0-{n + 1}.")
+                
+        except KeyboardInterrupt:
+            print("\n\n  Interrupted. Goodbye!\n")
+            break
+        except Exception as e:
+            print(f"  Error: {e}")
 
 
 if __name__ == "__main__":
-    # Check for command line arguments
     if len(sys.argv) > 1:
         if sys.argv[1] in ['--help', '-h']:
             print(__doc__)
@@ -273,12 +222,10 @@ if __name__ == "__main__":
             print("  python main.py C101.25")
             print("  python main.py C101.100 100 500 5")
         else:
-            # Direct instance run
             instance = sys.argv[1].upper()
             pop = int(sys.argv[2]) if len(sys.argv) > 2 else 100
             gen = int(sys.argv[3]) if len(sys.argv) > 3 else 500
             runs = int(sys.argv[4]) if len(sys.argv) > 4 else 1
             run_optimization(instance, pop, gen, runs)
     else:
-        # Interactive mode
         interactive_menu()

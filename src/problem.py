@@ -40,13 +40,28 @@ class HHCInstance:
     customers: List[Customer]  # List of patients (excluding depot)
     depot: Customer            # Depot/healthcare center
     
+    def __post_init__(self):
+        """Build lookup structures for fast evaluation"""
+        # O(1) customer lookup by ID
+        self._customer_map = {c.id: c for c in self.customers}
+        self._customer_map[self.depot.id] = self.depot
+        # Distance cache for frequently computed pairs
+        self._dist_cache = {}
+    
     @property
     def num_customers(self) -> int:
         return len(self.customers)
     
+    def get_customer(self, cust_id: int) -> Optional[Customer]:
+        """Fast O(1) customer lookup by ID"""
+        return self._customer_map.get(cust_id)
+    
     def get_distance(self, c1: Customer, c2: Customer) -> float:
-        """Calculate Euclidean distance between two customers"""
-        return math.sqrt((c1.x - c2.x)**2 + (c1.y - c2.y)**2)
+        """Calculate Euclidean distance between two customers (cached)"""
+        key = (c1.id, c2.id)
+        if key not in self._dist_cache:
+            self._dist_cache[key] = math.sqrt((c1.x - c2.x)**2 + (c1.y - c2.y)**2)
+        return self._dist_cache[key]
     
     def get_distance_matrix(self) -> List[List[float]]:
         """Generate full distance matrix including depot"""
@@ -117,12 +132,8 @@ class Solution:
             route_demand = 0.0
             
             for cust_id in route:
-                # Find customer
-                customer = None
-                for c in self.instance.customers:
-                    if c.id == cust_id:
-                        customer = c
-                        break
+                # Fast O(1) customer lookup
+                customer = self.instance.get_customer(cust_id)
                 
                 if customer is None:
                     continue
@@ -140,9 +151,13 @@ class Solution:
                 # Wait if arriving before ready time (earliest start)
                 start_service = max(arrival_time, customer.ready_time)
                 
-                # Calculate tardiness (late arrival penalty)
-                tardiness = max(0, arrival_time - customer.due_date)
-                total_tardiness += tardiness
+                # Calculate tardiness using earliness + lateness formulation:
+                # F2 = sum of [max(a_i - S_ic, 0) + max((S_ic + d_ic) - b_i, 0)]
+                # Term 1: earliness penalty (always 0 since S_ic >= a_i by waiting)
+                earliness = max(0, customer.ready_time - start_service)
+                # Term 2: tardiness penalty (service completion exceeds due date)
+                lateness = max(0, (start_service + customer.service_time) - customer.due_date)
+                total_tardiness += earliness + lateness
                 
                 # Add service time
                 total_service_time += customer.service_time
@@ -172,10 +187,9 @@ class Solution:
         for route in self.routes:
             route_demand = 0.0
             for cust_id in route:
-                for c in self.instance.customers:
-                    if c.id == cust_id:
-                        route_demand += c.demand
-                        break
+                c = self.instance.get_customer(cust_id)
+                if c:
+                    route_demand += c.demand
             if route_demand > self.instance.vehicle_capacity:
                 return False
         return True

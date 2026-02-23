@@ -13,7 +13,7 @@ This is used as the core optimizer in Stage 2 of K-NSGA-II.
 
 import random
 import math
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional
 from .problem import HHCInstance, Customer, Solution
 
 
@@ -38,8 +38,8 @@ class NSGA2:
         customers: Optional[List[Customer]] = None,
         population_size: int = 100,
         max_generations: int = 1000,
-        crossover_rate: float = 0.9,
-        mutation_rate: float = 0.1,
+        crossover_rate: float = 0.7,
+        mutation_rate: float = 0.2,
         random_state: Optional[int] = None
     ):
         """
@@ -71,12 +71,10 @@ class NSGA2:
         """Create a random solution (chromosome)"""
         solution = Solution(self.instance)
         
-        # Get customer IDs to route
         customer_ids = [c.id for c in self.customers]
         random.shuffle(customer_ids)
         
-        # Simple: single route with all customers
-        # This represents a permutation-based encoding
+        # Single route with all customers (permutation-based encoding)
         solution.routes = [customer_ids]
         solution.evaluate()
         
@@ -101,20 +99,20 @@ class NSGA2:
         route.append(current.id)
         unvisited.remove(current.id)
         
+        # O(1) customer lookup for nearest neighbor search
+        cust_map = {c.id: c for c in self.customers}
+        
         # Build route using nearest neighbor
         while unvisited:
-            # Find nearest unvisited customer
             nearest = None
             min_dist = float('inf')
             
             for cid in unvisited:
-                for c in self.customers:
-                    if c.id == cid:
-                        dist = math.sqrt((c.x - current.x)**2 + (c.y - current.y)**2)
-                        if dist < min_dist:
-                            min_dist = dist
-                            nearest = c
-                        break
+                c = cust_map[cid]
+                dist = math.sqrt((c.x - current.x)**2 + (c.y - current.y)**2)
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest = c
             
             if nearest:
                 route.append(nearest.id)
@@ -144,48 +142,57 @@ class NSGA2:
     def _fast_non_dominated_sort(self, population: List[Solution]) -> List[List[Solution]]:
         """
         Fast non-dominated sorting (NSGA-II)
+        O(MN^2) where M=objectives, N=population size
         Returns list of fronts, each front is a list of solutions
         """
         n = len(population)
-        S: Dict[int, List[int]] = {i: [] for i in range(n)}  # Solutions dominated by i
-        n_p: Dict[int, int] = {i: 0 for i in range(n)}        # Domination count for i
-        fronts: List[List[Solution]] = [[]]
-        rank: Dict[int, int] = {}
+        S = [[] for _ in range(n)]          # Solutions dominated by i
+        n_p = [0] * n                        # Domination count for i
+        fronts = [[]]
         
-        # Calculate domination for each pair
+        # Inline dominance check for speed (avoid method call overhead)
         for p in range(n):
-            for q in range(n):
-                if p == q:
-                    continue
+            p_f1 = population[p].f1
+            p_f2 = population[p].f2
+            for q in range(p + 1, n):
+                q_f1 = population[q].f1
+                q_f2 = population[q].f2
                 
-                if population[p].dominates(population[q]):
+                # Check if p dominates q
+                if p_f1 <= q_f1 and p_f2 <= q_f2 and (p_f1 < q_f1 or p_f2 < q_f2):
                     S[p].append(q)
-                elif population[q].dominates(population[p]):
+                    n_p[q] += 1
+                # Check if q dominates p
+                elif q_f1 <= p_f1 and q_f2 <= p_f2 and (q_f1 < p_f1 or q_f2 < p_f2):
+                    S[q].append(p)
                     n_p[p] += 1
             
             if n_p[p] == 0:
-                rank[p] = 0
                 population[p].rank = 0
                 fronts[0].append(population[p])
         
-        # Build subsequent fronts
+        # Build subsequent fronts using index sets for O(1) membership
         i = 0
-        while fronts[i]:
+        front_indices = set()
+        for p_idx in range(n):
+            if n_p[p_idx] == 0:
+                front_indices.add(p_idx)
+        
+        while front_indices:
             next_front = []
-            for p_idx, p in enumerate(population):
-                if p in fronts[i]:
-                    for q in S[p_idx]:
-                        n_p[q] -= 1
-                        if n_p[q] == 0:
-                            rank[q] = i + 1
-                            population[q].rank = i + 1
-                            next_front.append(population[q])
+            next_indices = set()
+            for p_idx in front_indices:
+                for q in S[p_idx]:
+                    n_p[q] -= 1
+                    if n_p[q] == 0:
+                        population[q].rank = i + 1
+                        next_front.append(population[q])
+                        next_indices.add(q)
             
             i += 1
             if next_front:
                 fronts.append(next_front)
-            else:
-                break
+            front_indices = next_indices
         
         return fronts
     
@@ -251,6 +258,10 @@ class NSGA2:
         if len(route1) < 2 or len(route2) < 2:
             return parent1.copy(), parent2.copy()
         
+        # Ensure same length (required for valid OX)
+        if len(route1) != len(route2):
+            return parent1.copy(), parent2.copy()
+        
         size = len(route1)
         
         # Select crossover points
@@ -272,17 +283,17 @@ class NSGA2:
             offspring1[i] = route1[i]
             offspring2[i] = route2[i]
         
-        # Fill remaining positions
+        # Fill remaining positions using Order Crossover (OX) logic
+        # Uses a set for O(1) lookup and a safety counter
         def fill_remaining(offspring, other_parent, p1, p2):
-            current_pos = (p2 + 1) % size
-            parent_pos = (p2 + 1) % size
-            
-            while -1 in offspring:
-                gene = other_parent[parent_pos]
-                if gene not in offspring:
-                    offspring[current_pos] = gene
-                    current_pos = (current_pos + 1) % size
-                parent_pos = (parent_pos + 1) % size
+            segment_genes = set(offspring[p1:p2 + 1])
+            # Collect genes from other_parent in order, skipping those in segment
+            fill_genes = [g for g in other_parent[p2 + 1:] + other_parent[:p2 + 1]
+                          if g not in segment_genes]
+            pos = (p2 + 1) % size
+            for gene in fill_genes:
+                offspring[pos] = gene
+                pos = (pos + 1) % size
         
         fill_remaining(offspring1, route2, point1, point2)
         fill_remaining(offspring2, route1, point1, point2)

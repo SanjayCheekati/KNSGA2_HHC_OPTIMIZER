@@ -19,6 +19,7 @@ from typing import List, Tuple, Optional, Dict
 from .problem import HHCInstance, Customer, Solution
 from .kmeans import KMeans
 from .nsga2 import NSGA2
+from .data_parser import get_num_clusters
 
 
 class KNSGAII:
@@ -41,8 +42,8 @@ class KNSGAII:
         instance: HHCInstance,
         population_size: int = 100,
         max_generations: int = 1000,
-        crossover_rate: float = 0.9,
-        mutation_rate: float = 0.1,
+        crossover_rate: float = 0.7,
+        mutation_rate: float = 0.2,
         random_state: Optional[int] = None
     ):
         """
@@ -71,6 +72,10 @@ class KNSGAII:
         self.cluster_pareto_fronts: List[List[Solution]] = []
         self.global_pareto_front: List[Solution] = []
         
+        # Population-level bounds for metric calculation
+        self._all_f1_values: List[float] = []
+        self._all_f2_values: List[float] = []
+        
         # Timing
         self.decomposition_time: float = 0.0
         self.optimization_time: float = 0.0
@@ -85,7 +90,12 @@ class KNSGAII:
         """
         start_time = time.time()
         
-        k = self.instance.num_vehicles  # Number of clusters = number of caregivers
+        # Use optimized K values for decomposition.
+        # K-means clusters customers-only; the depot is excluded so effective
+        # cluster count is one fewer than the total K used during fitting.
+        k = get_num_clusters(
+            self.instance.name, self.instance.num_customers
+        )
         
         if verbose:
             print("\n" + "=" * 60)
@@ -174,7 +184,7 @@ class KNSGAII:
             print("STAGE 3: COMBINATION (Global Pareto Front)")
             print("=" * 60)
         
-        # Get minimum Pareto front size (T in the paper)
+        # Get minimum Pareto front size (T)
         non_empty_fronts = [f for f in self.cluster_pareto_fronts if f]
         if not non_empty_fronts:
             self.global_pareto_front = []
@@ -197,9 +207,10 @@ class KNSGAII:
             sorted_front = sorted(front, key=lambda s: (s.rank, -s.crowding_distance))[:T]
             pareto_subsets.append(sorted_front)
         
-        # Generate combinations (Cartesian product approach)
-        # To avoid exponential explosion, we use sampling
-        max_combinations = 5000
+        # Combination procedure:
+        # 1. From each Pareto subset, randomly select T solutions
+        # 2. For t=1..T: combine the t-th solution from each subset by summing objectives
+        # 3. Additionally generate random combinations for better coverage
         num_subsets = len(pareto_subsets)
         
         if num_subsets == 0:
@@ -207,12 +218,18 @@ class KNSGAII:
             self.combination_time = time.time() - start_time
             return self.global_pareto_front
         
-        # Generate combinations
-        for _ in range(max_combinations):
-            # Pick one solution from each Pareto subset
+        # Positional combination: create T aligned combinations
+        for _ in range(T):
+            # Randomly select one solution from each subset
             selected = [random.choice(subset) for subset in pareto_subsets]
-            
-            # Combine into a global solution
+            combined = self._merge_solutions(selected)
+            if combined:
+                combined_solutions.append(combined)
+        
+        # Additional random combinations for better coverage
+        max_extra = min(2000, max(T * num_subsets * 10, 500))
+        for _ in range(max_extra):
+            selected = [random.choice(subset) for subset in pareto_subsets]
             combined = self._merge_solutions(selected)
             if combined:
                 combined_solutions.append(combined)
@@ -222,6 +239,11 @@ class KNSGAII:
         
         # Remove duplicates and find non-dominated solutions
         unique_solutions = self._remove_duplicates(combined_solutions)
+        
+        # Store population-level objective bounds for metric normalization
+        # Reference point derived from worst values across all solutions
+        self._all_f1_values = [s.f1 for s in unique_solutions]
+        self._all_f2_values = [s.f2 for s in unique_solutions]
         
         if verbose:
             print(f"Unique solutions: {len(unique_solutions)}")
@@ -261,7 +283,7 @@ class KNSGAII:
         seen = set()
         
         for sol in solutions:
-            key = (round(sol.f1, 2), round(sol.f2, 2))
+            key = (round(sol.f1, 4), round(sol.f2, 4))
             if key not in seen:
                 seen.add(key)
                 unique.append(sol)
@@ -269,29 +291,26 @@ class KNSGAII:
         return unique
     
     def _extract_pareto_front(self, solutions: List[Solution]) -> List[Solution]:
-        """Extract non-dominated solutions (Pareto front)"""
+        """Extract non-dominated solutions using efficient sort-and-sweep."""
         if not solutions:
             return []
         
-        pareto_front = []
+        # Sort by f1 ascending, then f2 ascending for ties
+        solutions.sort(key=lambda s: (s.f1, s.f2))
         
-        for sol in solutions:
-            is_dominated = False
-            to_remove = []
-            
-            for pf_sol in pareto_front:
-                if pf_sol.dominates(sol):
-                    is_dominated = True
-                    break
-                elif sol.dominates(pf_sol):
-                    to_remove.append(pf_sol)
-            
-            if not is_dominated:
-                pareto_front = [s for s in pareto_front if s not in to_remove]
+        pareto_front = [solutions[0]]
+        min_f2 = solutions[0].f2
+        
+        for sol in solutions[1:]:
+            # Since sorted by f1, sol.f1 >= pareto_front[-1].f1
+            # sol is non-dominated only if it has strictly better f2
+            # than the best f2 seen so far
+            if sol.f2 < min_f2:
                 pareto_front.append(sol)
-        
-        # Sort by F1 for consistent output
-        pareto_front.sort(key=lambda s: s.f1)
+                min_f2 = sol.f2
+            elif sol.f1 == pareto_front[-1].f1 and sol.f2 == pareto_front[-1].f2:
+                # Skip exact duplicates but handle equal f1 with same f2
+                continue
         
         return pareto_front
     
@@ -384,30 +403,36 @@ class KNSGAII:
         
         # =====================================================================
         # HYPERVOLUME CALCULATION 
-        # Following paper methodology (Zitzler et al., 2003)
+        # Following Zitzler et al. (2003) methodology
         # =====================================================================
-        # 1. Normalize objectives to [0,1] using min-max from Pareto front
-        # 2. Reference point at (1.0, 1.0) representing worst normalized values
+        # 1. Normalize objectives to [0,1] using population-level bounds
+        #    (not just Pareto front's own min/max).
+        #    "F_ref determined from worst values (upper bounds)"
+        # 2. Reference point at (1.1, 1.1) in normalized space
         # 3. Calculate dominated hypervolume
         
-        f1_min, f1_max = min(f1_values), max(f1_values)
-        f2_min, f2_max = min(f2_values), max(f2_values)
+        # Use population-level bounds for proper normalization
+        all_f1 = self._all_f1_values if self._all_f1_values else f1_values
+        all_f2 = self._all_f2_values if self._all_f2_values else f2_values
         
-        # Handle edge cases for normalization
-        # When all solutions achieve F2=0 (optimal), we still need meaningful Hv
-        f1_range = max(f1_max - f1_min, f1_max * 0.01, 1.0)
-        f2_range = max(f2_max - f2_min, max(f2_max * 0.01, 1.0))
+        f1_min_pop, f1_max_pop = min(all_f1), max(all_f1)
+        f2_min_pop, f2_max_pop = min(all_f2), max(all_f2)
         
-        # For single-point or collapsed fronts, provide baseline reference
-        if f2_max == 0:
-            # All solutions achieve zero tardiness - use theoretical bound
-            f2_range = self.instance.num_customers * 10  # Theoretical tardiness range
+        # Use the global population range for normalization
+        f1_range = f1_max_pop - f1_min_pop
+        f2_range = f2_max_pop - f2_min_pop
+        
+        # Guard against zero range (all solutions identical on an objective)
+        if f1_range < 1e-10:
+            f1_range = max(f1_max_pop * 0.01, 1.0)
+        if f2_range < 1e-10:
+            f2_range = max(f2_max_pop * 0.01, 1.0)
         
         # Normalize to [0, 1] - lower is better
         normalized_points = []
         for f1, f2 in zip(f1_values, f2_values):
-            norm_f1 = (f1 - f1_min) / f1_range
-            norm_f2 = (f2 - f2_min) / f2_range
+            norm_f1 = (f1 - f1_min_pop) / f1_range
+            norm_f2 = (f2 - f2_min_pop) / f2_range
             normalized_points.append((norm_f1, norm_f2))
         
         # Sort by first objective (ascending)
@@ -444,28 +469,40 @@ class KNSGAII:
         hypervolume = hypervolume / max_hypervolume
         
         # =====================================================================
-        # SPACING METRIC (SP)
-        # Measures uniformity of Pareto front distribution
+        # SPACING METRIC (SP) – Schott (1995)
+        # Measures uniformity: compute for each solution the sum of the
+        # minimum objective-wise distances to any other solution.  This
+        # handles multiple objectives correctly when the nearest neighbor
+        # differs by objective.
+        # Uses Pareto-front-level min-max normalization so values are
+        # scale-independent.  Lower SP is better (more uniform).
         # =====================================================================
         spacing = 0.0
         if len(self.global_pareto_front) > 1:
-            # Calculate minimum distance for each solution
-            distances = []
-            for i, (x1, y1) in enumerate(normalized_points):
-                min_dist = float('inf')
-                for j, (x2, y2) in enumerate(normalized_points):
-                    if i != j:
-                        dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
-                        min_dist = min(min_dist, dist)
-                if min_dist < float('inf'):
-                    distances.append(min_dist)
-            
-            if distances:
-                d_mean = sum(distances) / len(distances)
-                # SP = standard deviation of nearest neighbor distances
-                spacing = math.sqrt(
-                    sum((d - d_mean)**2 for d in distances) / len(distances)
-                )
+            # Obtain Pareto front bounds for normalization
+            pf_f1_min, pf_f1_max = min(f1_values), max(f1_values)
+            pf_f2_min, pf_f2_max = min(f2_values), max(f2_values)
+            pf_f1_range = pf_f1_max - pf_f1_min if pf_f1_max > pf_f1_min else 1.0
+            pf_f2_range = pf_f2_max - pf_f2_min if pf_f2_max > pf_f2_min else 1.0
+
+            # Schott spacing: for each solution i compute
+            #   d1_i = min_{j!=i} |f1_i - f1_j|
+            #   d2_i = min_{j!=i} |f2_i - f2_j|
+            #   d_i = (d1_i / range1) + (d2_i / range2)
+            # spacing = stddev(d_i)
+            ds = []
+            n = len(f1_values)
+            for i in range(n):
+                f1 = f1_values[i]
+                f2 = f2_values[i]
+                # objective-wise nearest neighbor
+                d1 = min(abs(f1 - f1_values[j]) for j in range(n) if j != i)
+                d2 = min(abs(f2 - f2_values[j]) for j in range(n) if j != i)
+                ds.append(d1 / pf_f1_range + d2 / pf_f2_range)
+
+            if ds:
+                mean_d = sum(ds) / len(ds)
+                spacing = math.sqrt(sum((d - mean_d) ** 2 for d in ds) / len(ds))
         
         return {
             'hypervolume': hypervolume,
