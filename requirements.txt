@@ -1,0 +1,3 @@
+# K-NSGA-II HHC Optimizer
+# No external dependencies — pure Python standard library implementation.
+# Python 3.8+ required.
