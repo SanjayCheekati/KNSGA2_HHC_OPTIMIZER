@@ -6,7 +6,11 @@ For the decomposition stage of K-NSGA-II
 import random
 import math
 from typing import List, Tuple, Optional
-from .problem import Customer
+
+try:
+    from .problem import Customer
+except ImportError:  # Allows running as a script from the src directory.
+    from problem import Customer
 
 
 class KMeans:

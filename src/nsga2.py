@@ -14,7 +14,11 @@ This is used as the core optimizer in Stage 2 of K-NSGA-II.
 import random
 import math
 from typing import List, Tuple, Optional
-from .problem import HHCInstance, Customer, Solution
+
+try:
+    from .problem import HHCInstance, Customer, Solution
+except ImportError:  # Allows running as a script from the src directory.
+    from problem import HHCInstance, Customer, Solution
 
 
 class NSGA2:

@@ -5,7 +5,11 @@ Parses Solomon VRPTW format files for HHC-MOVRPTW
 
 import os
 from typing import Optional
-from .problem import Customer, HHCInstance
+
+try:
+    from .problem import Customer, HHCInstance
+except ImportError:  # Allows running as a script from the src directory.
+    from problem import Customer, HHCInstance
 # Experimentally optimized number of clusters (K) for each benchmark instance.
 # K includes a depot cluster during fitting, but since our K-means operates
 # on customers only (no depot), we store the effective K-1 value here.

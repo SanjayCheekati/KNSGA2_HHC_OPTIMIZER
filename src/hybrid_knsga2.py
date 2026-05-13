@@ -16,10 +16,17 @@ import random
 import math
 import time
 from typing import List, Tuple, Optional, Dict
-from .problem import HHCInstance, Customer, Solution
-from .kmeans import KMeans
-from .nsga2 import NSGA2
-from .data_parser import get_num_clusters
+
+try:
+    from .problem import HHCInstance, Customer, Solution
+    from .kmeans import KMeans
+    from .nsga2 import NSGA2
+    from .data_parser import get_num_clusters
+except ImportError:  # Allows running as a script from the src directory.
+    from problem import HHCInstance, Customer, Solution
+    from kmeans import KMeans
+    from nsga2 import NSGA2
+    from data_parser import get_num_clusters
 
 
 class KNSGAII:

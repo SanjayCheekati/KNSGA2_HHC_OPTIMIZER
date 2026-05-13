@@ -19,8 +19,13 @@ import time
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, asdict
-from .data_parser import load_instance
-from .hybrid_knsga2 import KNSGAII
+
+try:
+    from .data_parser import load_instance
+    from .hybrid_knsga2 import KNSGAII
+except ImportError:  # Allows running as a script from the src directory.
+    from data_parser import load_instance
+    from hybrid_knsga2 import KNSGAII
 
 
 @dataclass
